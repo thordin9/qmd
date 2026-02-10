@@ -13,8 +13,12 @@
 
 import { Database } from "bun:sqlite";
 import { Glob } from "bun";
-import { realpathSync, statSync } from "node:fs";
+import { realpathSync } from "node:fs";
 import * as sqliteVec from "sqlite-vec";
+import { 
+  type IDatabase, 
+  createSQLiteDatabase 
+} from "./database";
 import {
   getDefaultLlamaCpp,
   getDefaultLLM,
@@ -56,6 +60,27 @@ export const CHUNK_OVERLAP_TOKENS = Math.floor(CHUNK_SIZE_TOKENS * 0.15);  // 12
 // Fallback char-based approximation for sync chunking (~4 chars per token)
 export const CHUNK_SIZE_CHARS = CHUNK_SIZE_TOKENS * 4;  // 3200 chars
 export const CHUNK_OVERLAP_CHARS = CHUNK_OVERLAP_TOKENS * 4;  // 480 chars
+
+// Hybrid query: strong BM25 signal detection thresholds
+// Skip expensive LLM expansion when top result is strong AND clearly separated from runner-up
+export const STRONG_SIGNAL_MIN_SCORE = 0.85;
+export const STRONG_SIGNAL_MIN_GAP = 0.15;
+// Max candidates to pass to reranker — balances quality vs latency.
+// 40 keeps rank 31-40 visible to the reranker (matters for recall on broad queries).
+export const RERANK_CANDIDATE_LIMIT = 40;
+
+/**
+ * A typed query expansion result. Decoupled from llm.ts internal Queryable —
+ * same shape, but store.ts owns its own public API type.
+ *
+ * - lex: keyword variant → routes to FTS only
+ * - vec: semantic variant → routes to vector only
+ * - hyde: hypothetical document → routes to vector only
+ */
+export type ExpandedQuery = {
+  type: 'lex' | 'vec' | 'hyde';
+  text: string;
+};
 
 // =============================================================================
 // Path utilities
@@ -363,7 +388,7 @@ export function isVirtualPath(path: string): boolean {
 /**
  * Resolve a virtual path to absolute filesystem path.
  */
-export function resolveVirtualPath(db: Database, virtualPath: string): string | null {
+export function resolveVirtualPath(db: IDatabase, virtualPath: string): string | null {
   const parsed = parseVirtualPath(virtualPath);
   if (!parsed) return null;
 
@@ -377,7 +402,7 @@ export function resolveVirtualPath(db: Database, virtualPath: string): string | 
  * Convert an absolute filesystem path to a virtual path.
  * Returns null if the file is not in any indexed collection.
  */
-export function toVirtualPath(db: Database, absolutePath: string): string | null {
+export function toVirtualPath(db: IDatabase, absolutePath: string): string | null {
   // Get all collections from YAML config
   const collections = collectionsListCollections();
 
@@ -410,46 +435,31 @@ export function toVirtualPath(db: Database, absolutePath: string): string | null
 // Database initialization
 // =============================================================================
 
-function setSQLiteFromBrewPrefixEnv(): void {
-  const candidates: string[] = [];
-
-  if (process.platform === "darwin") {
-    // Use BREW_PREFIX for non-standard Homebrew installs (common on corporate Macs).
-    const brewPrefix = Bun.env.BREW_PREFIX || Bun.env.HOMEBREW_PREFIX;
-    if (brewPrefix) {
-      // Homebrew can place SQLite in opt/sqlite (keg-only) or directly under the prefix.
-      candidates.push(`${brewPrefix}/opt/sqlite/lib/libsqlite3.dylib`);
-      candidates.push(`${brewPrefix}/lib/libsqlite3.dylib`);
-    } else {
-      candidates.push("/opt/homebrew/opt/sqlite/lib/libsqlite3.dylib");
-      candidates.push("/usr/local/opt/sqlite/lib/libsqlite3.dylib");
-    }
-  }
-
-  for (const candidate of candidates) {
+/**
+ * Initialize the database with SQLite-specific configuration.
+ * 
+ * Note: This function is currently SQLite-specific and executes SQLite PRAGMAs.
+ * If adding support for other database backends, this should be refactored into
+ * database-specific initialization functions or moved into the SQLiteDatabase class.
+ * 
+ * @param db - Database instance (currently must be SQLite)
+ */
+function initializeDatabase(db: IDatabase): void {
+  // Load sqlite-vec extension if the database supports extensions
+  if (db.supportsExtensions()) {
+    const nativeDb = db.getNativeDatabase() as Database;
     try {
-      if (statSync(candidate).size > 0) {
-        Database.setCustomSQLite(candidate);
-        return;
+      sqliteVec.load(nativeDb);
+    } catch (err) {
+      if (err instanceof Error && err.message.includes("does not support dynamic extension loading")) {
+        throw new Error(
+          "SQLite build does not support dynamic extension loading. " +
+          "Install Homebrew SQLite so the sqlite-vec extension can be loaded, " +
+          "and set BREW_PREFIX if Homebrew is installed in a non-standard location."
+        );
       }
-    } catch { }
-  }
-}
-
-setSQLiteFromBrewPrefixEnv();
-
-function initializeDatabase(db: Database): void {
-  try {
-    sqliteVec.load(db);
-  } catch (err) {
-    if (err instanceof Error && err.message.includes("does not support dynamic extension loading")) {
-      throw new Error(
-        "SQLite build does not support dynamic extension loading. " +
-        "Install Homebrew SQLite so the sqlite-vec extension can be loaded, " +
-        "and set BREW_PREFIX if Homebrew is installed in a non-standard location."
-      );
+      throw err;
     }
-    throw err;
   }
   db.exec("PRAGMA journal_mode = WAL");
   db.exec("PRAGMA foreign_keys = ON");
@@ -563,7 +573,7 @@ function initializeDatabase(db: Database): void {
 }
 
 
-function ensureVecTableInternal(db: Database, dimensions: number): void {
+function ensureVecTableInternal(db: IDatabase, dimensions: number): void {
   const tableInfo = db.prepare(`SELECT sql FROM sqlite_master WHERE type='table' AND name='vectors_vec'`).get() as { sql: string } | null;
   if (tableInfo) {
     const match = tableInfo.sql.match(/float\[(\d+)\]/);
@@ -582,7 +592,7 @@ function ensureVecTableInternal(db: Database, dimensions: number): void {
 // =============================================================================
 
 export type Store = {
-  db: Database;
+  db: IDatabase;
   dbPath: string;
   close: () => void;
   ensureVecTable: (dimensions: number) => void;
@@ -624,7 +634,7 @@ export type Store = {
   searchVec: (query: string, model: string, limit?: number, collectionName?: string) => Promise<SearchResult[]>;
 
   // Query expansion & reranking
-  expandQuery: (query: string, model?: string) => Promise<string[]>;
+  expandQuery: (query: string, model?: string) => Promise<ExpandedQuery[]>;
   rerank: (query: string, documents: { file: string; text: string }[], model?: string) => Promise<{ file: string; score: number }[]>;
 
   // Document retrieval
@@ -661,7 +671,7 @@ export type Store = {
  */
 export function createStore(dbPath?: string): Store {
   const resolvedPath = dbPath || getDefaultDbPath();
-  const db = new Database(resolvedPath);
+  const db = createSQLiteDatabase(resolvedPath);
   initializeDatabase(db);
 
   return {
@@ -883,7 +893,7 @@ export type IndexStatus = {
 // Index health
 // =============================================================================
 
-export function getHashesNeedingEmbedding(db: Database): number {
+export function getHashesNeedingEmbedding(db: IDatabase): number {
   const result = db.prepare(`
     SELECT COUNT(DISTINCT d.hash) as count
     FROM documents d
@@ -899,7 +909,7 @@ export type IndexHealthInfo = {
   daysStale: number | null;
 };
 
-export function getIndexHealth(db: Database): IndexHealthInfo {
+export function getIndexHealth(db: IDatabase): IndexHealthInfo {
   const needsEmbedding = getHashesNeedingEmbedding(db);
   const totalDocs = (db.prepare(`SELECT COUNT(*) as count FROM documents WHERE active = 1`).get() as { count: number }).count;
 
@@ -924,12 +934,12 @@ export function getCacheKey(url: string, body: object): string {
   return hash.digest("hex");
 }
 
-export function getCachedResult(db: Database, cacheKey: string): string | null {
+export function getCachedResult(db: IDatabase, cacheKey: string): string | null {
   const row = db.prepare(`SELECT result FROM llm_cache WHERE hash = ?`).get(cacheKey) as { result: string } | null;
   return row?.result || null;
 }
 
-export function setCachedResult(db: Database, cacheKey: string, result: string): void {
+export function setCachedResult(db: IDatabase, cacheKey: string, result: string): void {
   const now = new Date().toISOString();
   db.prepare(`INSERT OR REPLACE INTO llm_cache (hash, result, created_at) VALUES (?, ?, ?)`).run(cacheKey, result, now);
   if (Math.random() < 0.01) {
@@ -937,7 +947,7 @@ export function setCachedResult(db: Database, cacheKey: string, result: string):
   }
 }
 
-export function clearCache(db: Database): void {
+export function clearCache(db: IDatabase): void {
   db.exec(`DELETE FROM llm_cache`);
 }
 
@@ -949,7 +959,7 @@ export function clearCache(db: Database): void {
  * Delete cached LLM API responses.
  * Returns the number of cached responses deleted.
  */
-export function deleteLLMCache(db: Database): number {
+export function deleteLLMCache(db: IDatabase): number {
   const result = db.prepare(`DELETE FROM llm_cache`).run();
   return result.changes;
 }
@@ -958,7 +968,7 @@ export function deleteLLMCache(db: Database): number {
  * Remove inactive document records (active = 0).
  * Returns the number of inactive documents deleted.
  */
-export function deleteInactiveDocuments(db: Database): number {
+export function deleteInactiveDocuments(db: IDatabase): number {
   const result = db.prepare(`DELETE FROM documents WHERE active = 0`).run();
   return result.changes;
 }
@@ -967,7 +977,7 @@ export function deleteInactiveDocuments(db: Database): number {
  * Remove orphaned content hashes that are not referenced by any active document.
  * Returns the number of orphaned content hashes deleted.
  */
-export function cleanupOrphanedContent(db: Database): number {
+export function cleanupOrphanedContent(db: IDatabase): number {
   const result = db.prepare(`
     DELETE FROM content
     WHERE hash NOT IN (SELECT DISTINCT hash FROM documents WHERE active = 1)
@@ -979,7 +989,7 @@ export function cleanupOrphanedContent(db: Database): number {
  * Remove orphaned vector embeddings that are not referenced by any active document.
  * Returns the number of orphaned embedding chunks deleted.
  */
-export function cleanupOrphanedVectors(db: Database): number {
+export function cleanupOrphanedVectors(db: IDatabase): number {
   // Check if vectors_vec table exists
   const tableExists = db.prepare(`
     SELECT name FROM sqlite_master WHERE type='table' AND name='vectors_vec'
@@ -1025,7 +1035,7 @@ export function cleanupOrphanedVectors(db: Database): number {
  * Run VACUUM to reclaim unused space in the database.
  * This operation rebuilds the database file to eliminate fragmentation.
  */
-export function vacuumDatabase(db: Database): void {
+export function vacuumDatabase(db: IDatabase): void {
   db.exec(`VACUUM`);
 }
 
@@ -1079,7 +1089,7 @@ export function extractTitle(content: string, filename: string): string {
  * Insert content into the content table (content-addressable storage).
  * Uses INSERT OR IGNORE so duplicate hashes are skipped.
  */
-export function insertContent(db: Database, hash: string, content: string, createdAt: string): void {
+export function insertContent(db: IDatabase, hash: string, content: string, createdAt: string): void {
   db.prepare(`INSERT OR IGNORE INTO content (hash, doc, created_at) VALUES (?, ?, ?)`)
     .run(hash, content, createdAt);
 }
@@ -1088,7 +1098,7 @@ export function insertContent(db: Database, hash: string, content: string, creat
  * Insert a new document into the documents table.
  */
 export function insertDocument(
-  db: Database,
+  db: IDatabase,
   collectionName: string,
   path: string,
   title: string,
@@ -1106,7 +1116,7 @@ export function insertDocument(
  * Find an active document by collection name and path.
  */
 export function findActiveDocument(
-  db: Database,
+  db: IDatabase,
   collectionName: string,
   path: string
 ): { id: number; hash: string; title: string } | null {
@@ -1120,7 +1130,7 @@ export function findActiveDocument(
  * Update the title and modified_at timestamp for a document.
  */
 export function updateDocumentTitle(
-  db: Database,
+  db: IDatabase,
   documentId: number,
   title: string,
   modifiedAt: string
@@ -1134,7 +1144,7 @@ export function updateDocumentTitle(
  * Used when content changes but the file path stays the same.
  */
 export function updateDocument(
-  db: Database,
+  db: IDatabase,
   documentId: number,
   title: string,
   hash: string,
@@ -1147,7 +1157,7 @@ export function updateDocument(
 /**
  * Deactivate a document (mark as inactive but don't delete).
  */
-export function deactivateDocument(db: Database, collectionName: string, path: string): void {
+export function deactivateDocument(db: IDatabase, collectionName: string, path: string): void {
   db.prepare(`UPDATE documents SET active = 0 WHERE collection = ? AND path = ? AND active = 1`)
     .run(collectionName, path);
 }
@@ -1155,7 +1165,7 @@ export function deactivateDocument(db: Database, collectionName: string, path: s
 /**
  * Get all active document paths for a collection.
  */
-export function getActiveDocumentPaths(db: Database, collectionName: string): string[] {
+export function getActiveDocumentPaths(db: IDatabase, collectionName: string): string[] {
   const rows = db.prepare(`
     SELECT path FROM documents WHERE collection = ? AND active = 1
   `).all(collectionName) as { path: string }[];
@@ -1391,7 +1401,7 @@ export function isDocid(input: string): boolean {
  *
  * Accepts lenient input: #abc123, abc123, "#abc123", "abc123"
  */
-export function findDocumentByDocid(db: Database, docid: string): { filepath: string; hash: string } | null {
+export function findDocumentByDocid(db: IDatabase, docid: string): { filepath: string; hash: string } | null {
   const shortHash = normalizeDocid(docid);
 
   if (shortHash.length < 1) return null;
@@ -1407,7 +1417,7 @@ export function findDocumentByDocid(db: Database, docid: string): { filepath: st
   return doc;
 }
 
-export function findSimilarFiles(db: Database, query: string, maxDistance: number = 3, limit: number = 5): string[] {
+export function findSimilarFiles(db: IDatabase, query: string, maxDistance: number = 3, limit: number = 5): string[] {
   const allFiles = db.prepare(`
     SELECT d.path
     FROM documents d
@@ -1422,7 +1432,7 @@ export function findSimilarFiles(db: Database, query: string, maxDistance: numbe
   return scored.map(f => f.path);
 }
 
-export function matchFilesByGlob(db: Database, pattern: string): { filepath: string; displayPath: string; bodyLength: number }[] {
+export function matchFilesByGlob(db: IDatabase, pattern: string): { filepath: string; displayPath: string; bodyLength: number }[] {
   const allFiles = db.prepare(`
     SELECT
       'qmd://' || d.collection || '/' || d.path as virtual_path,
@@ -1458,7 +1468,7 @@ export function matchFilesByGlob(db: Database, pattern: string): { filepath: str
  * @param path Relative path within the collection
  * @returns Context string or null if no context is defined
  */
-export function getContextForPath(db: Database, collectionName: string, path: string): string | null {
+export function getContextForPath(db: IDatabase, collectionName: string, path: string): string | null {
   const config = collectionsLoadConfig();
   const coll = getCollection(collectionName);
 
@@ -1502,7 +1512,7 @@ export function getContextForPath(db: Database, collectionName: string, path: st
  * Get context for a file path (virtual or filesystem).
  * Resolves the collection and relative path using the YAML collections config.
  */
-export function getContextForFile(db: Database, filepath: string): string | null {
+export function getContextForFile(db: IDatabase, filepath: string): string | null {
   // Handle undefined or null filepath
   if (!filepath) return null;
 
@@ -1589,7 +1599,7 @@ export function getContextForFile(db: Database, filepath: string): string | null
  * Get collection by name from YAML config.
  * Returns collection metadata from ~/.config/qmd/index.yml
  */
-export function getCollectionByName(db: Database, name: string): { name: string; pwd: string; glob_pattern: string } | null {
+export function getCollectionByName(db: IDatabase, name: string): { name: string; pwd: string; glob_pattern: string } | null {
   const collection = getCollection(name);
   if (!collection) return null;
 
@@ -1604,7 +1614,7 @@ export function getCollectionByName(db: Database, name: string): { name: string;
  * List all collections with document counts from database.
  * Merges YAML config with database statistics.
  */
-export function listCollections(db: Database): { name: string; pwd: string; glob_pattern: string; doc_count: number; active_count: number; last_modified: string | null }[] {
+export function listCollections(db: IDatabase): { name: string; pwd: string; glob_pattern: string; doc_count: number; active_count: number; last_modified: string | null }[] {
   const collections = collectionsListCollections();
 
   // Get document counts from database for each collection
@@ -1635,7 +1645,7 @@ export function listCollections(db: Database): { name: string; pwd: string; glob
  * Remove a collection and clean up its documents.
  * Uses collections.ts to remove from YAML config and cleans up database.
  */
-export function removeCollection(db: Database, collectionName: string): { deletedDocs: number; cleanedHashes: number } {
+export function removeCollection(db: IDatabase, collectionName: string): { deletedDocs: number; cleanedHashes: number } {
   // Delete documents from database
   const docResult = db.prepare(`DELETE FROM documents WHERE collection = ?`).run(collectionName);
 
@@ -1658,7 +1668,7 @@ export function removeCollection(db: Database, collectionName: string): { delete
  * Rename a collection.
  * Updates both YAML config and database documents table.
  */
-export function renameCollection(db: Database, oldName: string, newName: string): void {
+export function renameCollection(db: IDatabase, oldName: string, newName: string): void {
   // Update all documents with the new collection name in database
   db.prepare(`UPDATE documents SET collection = ? WHERE collection = ?`)
     .run(newName, oldName);
@@ -1674,7 +1684,7 @@ export function renameCollection(db: Database, oldName: string, newName: string)
 /**
  * Insert or update a context for a specific collection and path prefix.
  */
-export function insertContext(db: Database, collectionId: number, pathPrefix: string, context: string): void {
+export function insertContext(db: IDatabase, collectionId: number, pathPrefix: string, context: string): void {
   // Get collection name from ID
   const coll = db.prepare(`SELECT name FROM collections WHERE id = ?`).get(collectionId) as { name: string } | null;
   if (!coll) {
@@ -1689,7 +1699,7 @@ export function insertContext(db: Database, collectionId: number, pathPrefix: st
  * Delete a context for a specific collection and path prefix.
  * Returns the number of contexts deleted.
  */
-export function deleteContext(db: Database, collectionName: string, pathPrefix: string): number {
+export function deleteContext(db: IDatabase, collectionName: string, pathPrefix: string): number {
   // Use collections.ts to remove context
   const success = collectionsRemoveContext(collectionName, pathPrefix);
   return success ? 1 : 0;
@@ -1699,7 +1709,7 @@ export function deleteContext(db: Database, collectionName: string, pathPrefix: 
  * Delete all global contexts (contexts with empty path_prefix).
  * Returns the number of contexts deleted.
  */
-export function deleteGlobalContexts(db: Database): number {
+export function deleteGlobalContexts(db: IDatabase): number {
   let deletedCount = 0;
 
   // Remove global context
@@ -1722,7 +1732,7 @@ export function deleteGlobalContexts(db: Database): number {
  * List all contexts, grouped by collection.
  * Returns contexts ordered by collection name, then by path prefix length (longest first).
  */
-export function listPathContexts(db: Database): { collection_name: string; path_prefix: string; context: string }[] {
+export function listPathContexts(db: IDatabase): { collection_name: string; path_prefix: string; context: string }[] {
   const allContexts = collectionsListAllContexts();
 
   // Convert to expected format and sort
@@ -1747,7 +1757,7 @@ export function listPathContexts(db: Database): { collection_name: string; path_
 /**
  * Get all collections (name only - from YAML config).
  */
-export function getAllCollections(db: Database): { name: string }[] {
+export function getAllCollections(db: IDatabase): { name: string }[] {
   const collections = collectionsListCollections();
   return collections.map(c => ({ name: c.name }));
 }
@@ -1756,7 +1766,7 @@ export function getAllCollections(db: Database): { name: string }[] {
  * Check which collections don't have any context defined.
  * Returns collections that have no context entries at all (not even root context).
  */
-export function getCollectionsWithoutContext(db: Database): { name: string; pwd: string; doc_count: number }[] {
+export function getCollectionsWithoutContext(db: IDatabase): { name: string; pwd: string; doc_count: number }[] {
   // Get all collections from YAML config
   const yamlCollections = collectionsListCollections();
 
@@ -1788,7 +1798,7 @@ export function getCollectionsWithoutContext(db: Database): { name: string; pwd:
  * Get top-level directories in a collection that don't have context.
  * Useful for suggesting where context might be needed.
  */
-export function getTopLevelPathsWithoutContext(db: Database, collectionName: string): string[] {
+export function getTopLevelPathsWithoutContext(db: IDatabase, collectionName: string): string[] {
   // Get all paths in the collection from database
   const paths = db.prepare(`
     SELECT DISTINCT path FROM documents
@@ -1854,7 +1864,7 @@ function buildFTS5Query(query: string): string | null {
   return terms.map(t => `"${t}"*`).join(' AND ');
 }
 
-export function searchFTS(db: Database, query: string, limit: number = 20, collectionId?: number): SearchResult[] {
+export function searchFTS(db: IDatabase, query: string, limit: number = 20, collectionId?: number): SearchResult[] {
   const ftsQuery = buildFTS5Query(query);
   if (!ftsQuery) return [];
 
@@ -1888,10 +1898,11 @@ export function searchFTS(db: Database, query: string, limit: number = 20, colle
   const rows = db.prepare(sql).all(...params) as { filepath: string; display_path: string; title: string; body: string; hash: string; bm25_score: number }[];
   return rows.map(row => {
     const collectionName = row.filepath.split('//')[1]?.split('/')[0] || "";
-    // Convert bm25 (negative, lower is better) into a stable (0..1] score where higher is better.
-    // BM25 scores in SQLite FTS5 are negative (e.g., -10 is strong, -2 is weak).
-    // Avoid per-query normalization so "strong signal" heuristics can work.
-    const score = 1 / (1 + Math.abs(row.bm25_score));
+    // Convert bm25 (negative, lower is better) into a stable [0..1) score where higher is better.
+    // FTS5 BM25 scores are negative (e.g., -10 is strong, -2 is weak).
+    // |x| / (1 + |x|) maps: strong(-10)→0.91, medium(-2)→0.67, weak(-0.5)→0.33, none(0)→0.
+    // Monotonic and query-independent — no per-query normalization needed.
+    const score = Math.abs(row.bm25_score) / (1 + Math.abs(row.bm25_score));
     return {
       filepath: row.filepath,
       displayPath: row.display_path,
@@ -1913,7 +1924,7 @@ export function searchFTS(db: Database, query: string, limit: number = 20, colle
 // Vector Search
 // =============================================================================
 
-export async function searchVec(db: Database, query: string, model: string, limit: number = 20, collectionName?: string, session?: ILLMSession): Promise<SearchResult[]> {
+export async function searchVec(db: IDatabase, query: string, model: string, limit: number = 20, collectionName?: string, session?: ILLMSession): Promise<SearchResult[]> {
   const tableExists = db.prepare(`SELECT name FROM sqlite_master WHERE type='table' AND name='vectors_vec'`).get();
   if (!tableExists) return [];
 
@@ -2020,7 +2031,7 @@ async function getEmbedding(text: string, model: string, isQuery: boolean, sessi
  * Get all unique content hashes that need embeddings (from active documents).
  * Returns hash, document body, and a sample path for display purposes.
  */
-export function getHashesForEmbedding(db: Database): { hash: string; body: string; path: string }[] {
+export function getHashesForEmbedding(db: IDatabase): { hash: string; body: string; path: string }[] {
   return db.prepare(`
     SELECT d.hash, c.doc as body, MIN(d.path) as path
     FROM documents d
@@ -2035,7 +2046,7 @@ export function getHashesForEmbedding(db: Database): { hash: string; body: strin
  * Clear all embeddings from the database (force re-index).
  * Deletes all rows from content_vectors and drops the vectors_vec table.
  */
-export function clearAllEmbeddings(db: Database): void {
+export function clearAllEmbeddings(db: IDatabase): void {
   db.exec(`DELETE FROM content_vectors`);
   db.exec(`DROP TABLE IF EXISTS vectors_vec`);
 }
@@ -2045,7 +2056,7 @@ export function clearAllEmbeddings(db: Database): void {
  * The hash_seq key is formatted as "hash_seq" for the vectors_vec table.
  */
 export function insertEmbedding(
-  db: Database,
+  db: IDatabase,
   hash: string,
   seq: number,
   pos: number,
@@ -2064,42 +2075,49 @@ export function insertEmbedding(
 // =============================================================================
 // Query expansion
 // =============================================================================
-
-export async function expandQuery(query: string, model: string = DEFAULT_QUERY_MODEL, db: Database): Promise<string[]> {
+export async function expandQuery(query: string, model: string = DEFAULT_QUERY_MODEL, db: IDatabase): Promise<ExpandedQuery[]> {
   const provider = getDefaultLLMProvider();
-  // Check cache first
+  // Check cache first — stored as JSON preserving types
   const cacheKey = getCacheKey("expandQuery", { query, model, provider });
   const cached = getCachedResult(db, cacheKey);
   if (cached) {
-    const lines = cached.split('\n').map(l => l.trim()).filter(l => l.length > 0);
-    return [query, ...lines.slice(0, 2)];
+    try {
+      return JSON.parse(cached) as ExpandedQuery[];
+    } catch {
+      // Old cache format (pre-typed, newline-separated text) — re-expand
+    }
   }
 
   const llm = getDefaultLLM();
   const results = await llm.expandQuery(query);
-  const queryTexts = results.map(r => r.text);
 
-  // Cache the expanded queries (excluding original)
-  const expandedOnly = queryTexts.filter(t => t !== query);
-  if (expandedOnly.length > 0) {
-    setCachedResult(db, cacheKey, expandedOnly.join('\n'));
+  // Map Queryable[] → ExpandedQuery[] (same shape, decoupled from llm.ts internals).
+  // Filter out entries that duplicate the original query text.
+  const expanded: ExpandedQuery[] = results
+    .filter(r => r.text !== query)
+    .map(r => ({ type: r.type, text: r.text }));
+
+  if (expanded.length > 0) {
+    setCachedResult(db, cacheKey, JSON.stringify(expanded));
   }
 
-  return Array.from(new Set([query, ...queryTexts]));
+  return expanded;
 }
 
 // =============================================================================
 // Reranking
 // =============================================================================
 
-export async function rerank(query: string, documents: { file: string; text: string }[], model: string = DEFAULT_RERANK_MODEL, db: Database): Promise<{ file: string; score: number }[]> {
+export async function rerank(query: string, documents: { file: string; text: string }[], model: string = DEFAULT_RERANK_MODEL, db: IDatabase): Promise<{ file: string; score: number }[]> {
   const provider = getDefaultLLMProvider();
   const cachedResults: Map<string, number> = new Map();
   const uncachedDocs: RerankDocument[] = [];
 
   // Check cache for each document
+  // Cache key includes chunk text — different queries can select different chunks
+  // from the same file, and the reranker score depends on which chunk was sent.
   for (const doc of documents) {
-    const cacheKey = getCacheKey("rerank", { query, file: doc.file, model, provider });
+    const cacheKey = getCacheKey("rerank", { query, file: doc.file, model, provider, chunk: doc.text });
     const cached = getCachedResult(db, cacheKey);
     if (cached !== null) {
       cachedResults.set(doc.file, parseFloat(cached));
@@ -2114,9 +2132,10 @@ export async function rerank(query: string, documents: { file: string; text: str
     const rerankOptions = provider === "local" ? { model } : {};
     const rerankResult = await llm.rerank(query, uncachedDocs, rerankOptions);
 
-    // Cache results
+    // Cache results — use original doc.text for cache key (result.file lacks chunk text)
+    const textByFile = new Map(documents.map(d => [d.file, d.text]));
     for (const result of rerankResult.results) {
-      const cacheKey = getCacheKey("rerank", { query, file: result.file, model, provider });
+      const cacheKey = getCacheKey("rerank", { query, file: result.file, model, provider, chunk: textByFile.get(result.file) || "" });
       setCachedResult(db, cacheKey, result.score.toString());
       cachedResults.set(result.file, result.score);
     }
@@ -2203,7 +2222,7 @@ type DbDocRow = {
  * - Relative paths: path/to/file.md
  * - Short docid: #abc123 (first 6 chars of hash)
  */
-export function findDocument(db: Database, filename: string, options: { includeBody?: boolean } = {}): DocumentResult | DocumentNotFound {
+export function findDocument(db: IDatabase, filename: string, options: { includeBody?: boolean } = {}): DocumentResult | DocumentNotFound {
   let filepath = filename;
   const colonMatch = filepath.match(/:(\d+)$/);
   if (colonMatch) {
@@ -2312,7 +2331,7 @@ export function findDocument(db: Database, filename: string, options: { includeB
  * Get the body content for a document
  * Optionally slice by line range
  */
-export function getDocumentBody(db: Database, doc: DocumentResult | { filepath: string }, fromLine?: number, maxLines?: number): string | null {
+export function getDocumentBody(db: IDatabase, doc: DocumentResult | { filepath: string }, fromLine?: number, maxLines?: number): string | null {
   const filepath = doc.filepath;
 
   // Try to resolve document by filepath (absolute or virtual)
@@ -2363,7 +2382,7 @@ export function getDocumentBody(db: Database, doc: DocumentResult | { filepath: 
  * Returns documents without body by default (use getDocumentBody to load)
  */
 export function findDocuments(
-  db: Database,
+  db: IDatabase,
   pattern: string,
   options: { includeBody?: boolean; maxBytes?: number } = {}
 ): { docs: MultiGetResult[]; errors: string[] } {
@@ -2472,7 +2491,7 @@ export function findDocuments(
 // Status
 // =============================================================================
 
-export function getStatus(db: Database): IndexStatus {
+export function getStatus(db: IDatabase): IndexStatus {
   // Load collections from YAML
   const yamlCollections = collectionsListCollections();
 
@@ -2585,4 +2604,315 @@ export function extractSnippet(body: string, query: string, maxLen = 500, chunkP
     linesAfter,
     snippetLines: snippetLineCount,
   };
+}
+
+// =============================================================================
+// Shared helpers (used by both CLI and MCP)
+// =============================================================================
+
+/**
+ * Add line numbers to text content.
+ * Each line becomes: "{lineNum}: {content}"
+ */
+export function addLineNumbers(text: string, startLine: number = 1): string {
+  const lines = text.split('\n');
+  return lines.map((line, i) => `${startLine + i}: ${line}`).join('\n');
+}
+
+// =============================================================================
+// Shared search orchestration
+//
+// hybridQuery() and vectorSearchQuery() are standalone functions (not Store
+// methods) because they are orchestration over primitives — same rationale as
+// reciprocalRankFusion(). They take a Store as first argument so both CLI
+// and MCP can share the identical pipeline.
+// =============================================================================
+
+/**
+ * Optional progress hooks for search orchestration.
+ * CLI wires these to stderr for user feedback; MCP leaves them unset.
+ */
+export interface SearchHooks {
+  /** BM25 probe found strong signal — expansion will be skipped */
+  onStrongSignal?: (topScore: number) => void;
+  /** Query expansion complete. Empty array = strong signal skip (no expansion). */
+  onExpand?: (original: string, expanded: ExpandedQuery[]) => void;
+  /** Reranking is about to start */
+  onRerankStart?: (chunkCount: number) => void;
+  /** Reranking finished */
+  onRerankDone?: () => void;
+}
+
+export interface HybridQueryOptions {
+  collection?: string;
+  limit?: number;           // default 10
+  minScore?: number;        // default 0
+  candidateLimit?: number;  // default RERANK_CANDIDATE_LIMIT
+  hooks?: SearchHooks;
+}
+
+export interface HybridQueryResult {
+  file: string;             // internal filepath (qmd://collection/path)
+  displayPath: string;
+  title: string;
+  body: string;             // full document body (for snippet extraction)
+  bestChunk: string;        // best chunk text
+  bestChunkPos: number;     // char offset of best chunk in body
+  score: number;            // blended score (full precision)
+  context: string | null;   // user-set context
+  docid: string;            // content hash prefix (6 chars)
+}
+
+/**
+ * Hybrid search: BM25 + vector + query expansion + RRF + chunked reranking.
+ *
+ * Pipeline:
+ * 1. BM25 probe → skip expansion if strong signal
+ * 2. expandQuery() → typed query variants (lex/vec/hyde)
+ * 3. Type-routed search: original→vector, lex→FTS, vec/hyde→vector
+ * 4. RRF fusion → slice to candidateLimit
+ * 5. chunkDocument() + keyword-best-chunk selection
+ * 6. rerank on chunks (NOT full bodies — O(tokens) trap)
+ * 7. Position-aware score blending (RRF rank × reranker score)
+ * 8. Dedup by file, filter by minScore, slice to limit
+ */
+export async function hybridQuery(
+  store: Store,
+  query: string,
+  options?: HybridQueryOptions
+): Promise<HybridQueryResult[]> {
+  const limit = options?.limit ?? 10;
+  const minScore = options?.minScore ?? 0;
+  const candidateLimit = options?.candidateLimit ?? RERANK_CANDIDATE_LIMIT;
+  const collection = options?.collection;
+  const hooks = options?.hooks;
+
+  const rankedLists: RankedResult[][] = [];
+  const docidMap = new Map<string, string>(); // filepath -> docid
+  const hasVectors = !!store.db.prepare(
+    `SELECT name FROM sqlite_master WHERE type='table' AND name='vectors_vec'`
+  ).get();
+
+  // Step 1: BM25 probe — strong signal skips expensive LLM expansion
+  const initialFts = store.searchFTS(query, 20)
+    .filter(r => !collection || r.collectionName === collection);
+  const topScore = initialFts[0]?.score ?? 0;
+  const secondScore = initialFts[1]?.score ?? 0;
+  const hasStrongSignal = initialFts.length > 0
+    && topScore >= STRONG_SIGNAL_MIN_SCORE
+    && (topScore - secondScore) >= STRONG_SIGNAL_MIN_GAP;
+
+  if (hasStrongSignal) hooks?.onStrongSignal?.(topScore);
+
+  // Step 2: Expand query (or skip if strong signal)
+  const expanded = hasStrongSignal
+    ? []
+    : await store.expandQuery(query);
+
+  hooks?.onExpand?.(query, expanded);
+
+  // Seed with initial FTS results (avoid re-running original query FTS)
+  if (initialFts.length > 0) {
+    for (const r of initialFts) docidMap.set(r.filepath, r.docid);
+    rankedLists.push(initialFts.map(r => ({
+      file: r.filepath, displayPath: r.displayPath,
+      title: r.title, body: r.body || "", score: r.score,
+    })));
+  }
+
+  // Step 3: Route searches by query type
+  // Original query → vector search (FTS already covered by probe in step 1).
+  // Vector searches run sequentially — node-llama-cpp's embed context
+  // hangs on concurrent embed() calls (known limitation).
+  if (hasVectors) {
+    const vecResults = await store.searchVec(query, DEFAULT_EMBED_MODEL, 20, collection);
+    if (vecResults.length > 0) {
+      for (const r of vecResults) docidMap.set(r.filepath, r.docid);
+      rankedLists.push(vecResults.map(r => ({
+        file: r.filepath, displayPath: r.displayPath,
+        title: r.title, body: r.body || "", score: r.score,
+      })));
+    }
+  }
+
+  // Expanded queries → route by type: lex→FTS only, vec/hyde→vector only.
+  // This restores the CLI's query-type-aware routing that was lost in the initial refactor.
+  for (const q of expanded) {
+    if (q.type === 'lex') {
+      const ftsResults = store.searchFTS(q.text, 20)
+        .filter(r => !collection || r.collectionName === collection);
+      if (ftsResults.length > 0) {
+        for (const r of ftsResults) docidMap.set(r.filepath, r.docid);
+        rankedLists.push(ftsResults.map(r => ({
+          file: r.filepath, displayPath: r.displayPath,
+          title: r.title, body: r.body || "", score: r.score,
+        })));
+      }
+    } else {
+      // vec or hyde → vector search only
+      if (hasVectors) {
+        const vecResults = await store.searchVec(q.text, DEFAULT_EMBED_MODEL, 20, collection);
+        if (vecResults.length > 0) {
+          for (const r of vecResults) docidMap.set(r.filepath, r.docid);
+          rankedLists.push(vecResults.map(r => ({
+            file: r.filepath, displayPath: r.displayPath,
+            title: r.title, body: r.body || "", score: r.score,
+          })));
+        }
+      }
+    }
+  }
+
+  // Step 4: RRF fusion — first 2 lists (original FTS + first vec) get 2x weight
+  const weights = rankedLists.map((_, i) => i < 2 ? 2.0 : 1.0);
+  const fused = reciprocalRankFusion(rankedLists, weights);
+  const candidates = fused.slice(0, candidateLimit);
+
+  if (candidates.length === 0) return [];
+
+  // Step 5: Chunk documents, pick best chunk per doc for reranking.
+  // Reranking full bodies is O(tokens) — the critical perf lesson that motivated this refactor.
+  const queryTerms = query.toLowerCase().split(/\s+/).filter(t => t.length > 2);
+  const chunksToRerank: { file: string; text: string }[] = [];
+  const docChunkMap = new Map<string, { chunks: { text: string; pos: number }[]; bestIdx: number }>();
+
+  for (const cand of candidates) {
+    const chunks = chunkDocument(cand.body);
+    if (chunks.length === 0) continue;
+
+    // Pick chunk with most keyword overlap (fallback: first chunk)
+    let bestIdx = 0;
+    let bestScore = -1;
+    for (let i = 0; i < chunks.length; i++) {
+      const chunkLower = chunks[i]!.text.toLowerCase();
+      const score = queryTerms.reduce((acc, term) => acc + (chunkLower.includes(term) ? 1 : 0), 0);
+      if (score > bestScore) { bestScore = score; bestIdx = i; }
+    }
+
+    chunksToRerank.push({ file: cand.file, text: chunks[bestIdx]!.text });
+    docChunkMap.set(cand.file, { chunks, bestIdx });
+  }
+
+  // Step 6: Rerank chunks (NOT full bodies)
+  hooks?.onRerankStart?.(chunksToRerank.length);
+  const reranked = await store.rerank(query, chunksToRerank);
+  hooks?.onRerankDone?.();
+
+  // Step 7: Blend RRF position score with reranker score
+  // Position-aware weights: top retrieval results get more protection from reranker disagreement
+  const candidateMap = new Map(candidates.map(c => [c.file, {
+    displayPath: c.displayPath, title: c.title, body: c.body,
+  }]));
+  const rrfRankMap = new Map(candidates.map((c, i) => [c.file, i + 1]));
+
+  const blended = reranked.map(r => {
+    const rrfRank = rrfRankMap.get(r.file) || candidateLimit;
+    let rrfWeight: number;
+    if (rrfRank <= 3) rrfWeight = 0.75;
+    else if (rrfRank <= 10) rrfWeight = 0.60;
+    else rrfWeight = 0.40;
+    const rrfScore = 1 / rrfRank;
+    const blendedScore = rrfWeight * rrfScore + (1 - rrfWeight) * r.score;
+
+    const candidate = candidateMap.get(r.file);
+    const chunkInfo = docChunkMap.get(r.file);
+    const bestIdx = chunkInfo?.bestIdx ?? 0;
+    const bestChunk = chunkInfo?.chunks[bestIdx]?.text || candidate?.body || "";
+    const bestChunkPos = chunkInfo?.chunks[bestIdx]?.pos || 0;
+
+    return {
+      file: r.file,
+      displayPath: candidate?.displayPath || "",
+      title: candidate?.title || "",
+      body: candidate?.body || "",
+      bestChunk,
+      bestChunkPos,
+      score: blendedScore,
+      context: store.getContextForFile(r.file),
+      docid: docidMap.get(r.file) || "",
+    };
+  }).sort((a, b) => b.score - a.score);
+
+  // Step 8: Dedup by file (safety net — prevents duplicate output)
+  const seenFiles = new Set<string>();
+  return blended
+    .filter(r => {
+      if (seenFiles.has(r.file)) return false;
+      seenFiles.add(r.file);
+      return true;
+    })
+    .filter(r => r.score >= minScore)
+    .slice(0, limit);
+}
+
+export interface VectorSearchOptions {
+  collection?: string;
+  limit?: number;           // default 10
+  minScore?: number;        // default 0.3
+  hooks?: Pick<SearchHooks, 'onExpand'>;
+}
+
+export interface VectorSearchResult {
+  file: string;
+  displayPath: string;
+  title: string;
+  body: string;
+  score: number;
+  context: string | null;
+  docid: string;
+}
+
+/**
+ * Vector-only semantic search with query expansion.
+ *
+ * Pipeline:
+ * 1. expandQuery() → typed variants, filter to vec/hyde only (lex irrelevant here)
+ * 2. searchVec() for original + vec/hyde variants (sequential — node-llama-cpp embed limitation)
+ * 3. Dedup by filepath (keep max score)
+ * 4. Sort by score descending, filter by minScore, slice to limit
+ */
+export async function vectorSearchQuery(
+  store: Store,
+  query: string,
+  options?: VectorSearchOptions
+): Promise<VectorSearchResult[]> {
+  const limit = options?.limit ?? 10;
+  const minScore = options?.minScore ?? 0.3;
+  const collection = options?.collection;
+
+  const hasVectors = !!store.db.prepare(
+    `SELECT name FROM sqlite_master WHERE type='table' AND name='vectors_vec'`
+  ).get();
+  if (!hasVectors) return [];
+
+  // Expand query — filter to vec/hyde only (lex queries target FTS, not vector)
+  const allExpanded = await store.expandQuery(query);
+  const vecExpanded = allExpanded.filter(q => q.type !== 'lex');
+  options?.hooks?.onExpand?.(query, vecExpanded);
+
+  // Run original + vec/hyde expanded through vector, sequentially — concurrent embed() hangs
+  const queryTexts = [query, ...vecExpanded.map(q => q.text)];
+  const allResults = new Map<string, VectorSearchResult>();
+  for (const q of queryTexts) {
+    const vecResults = await store.searchVec(q, DEFAULT_EMBED_MODEL, limit, collection);
+    for (const r of vecResults) {
+      const existing = allResults.get(r.filepath);
+      if (!existing || r.score > existing.score) {
+        allResults.set(r.filepath, {
+          file: r.filepath,
+          displayPath: r.displayPath,
+          title: r.title,
+          body: r.body || "",
+          score: r.score,
+          context: store.getContextForFile(r.filepath),
+          docid: r.docid,
+        });
+      }
+    }
+  }
+
+  return Array.from(allResults.values())
+    .sort((a, b) => b.score - a.score)
+    .filter(r => r.score >= minScore)
+    .slice(0, limit);
 }
