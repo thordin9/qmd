@@ -17,7 +17,8 @@ import { realpathSync } from "node:fs";
 import * as sqliteVec from "sqlite-vec";
 import { 
   type IDatabase, 
-  createSQLiteDatabase 
+  createSQLiteDatabase,
+  createDatabaseFromEnv 
 } from "./database";
 import {
   getDefaultLlamaCpp,
@@ -438,29 +439,24 @@ export function toVirtualPath(db: IDatabase, absolutePath: string): string | nul
 /**
  * Initialize the database with SQLite-specific configuration.
  * 
- * Note: This function is currently SQLite-specific and executes SQLite PRAGMAs.
- * If adding support for other database backends, this should be refactored into
- * database-specific initialization functions or moved into the SQLiteDatabase class.
- * 
- * @param db - Database instance (currently must be SQLite)
+ * @param db - SQLite database instance
  */
-function initializeDatabase(db: IDatabase): void {
-  // Load sqlite-vec extension if the database supports extensions
-  if (db.supportsExtensions()) {
-    const nativeDb = db.getNativeDatabase() as Database;
-    try {
-      sqliteVec.load(nativeDb);
-    } catch (err) {
-      if (err instanceof Error && err.message.includes("does not support dynamic extension loading")) {
-        throw new Error(
-          "SQLite build does not support dynamic extension loading. " +
-          "Install Homebrew SQLite so the sqlite-vec extension can be loaded, " +
-          "and set BREW_PREFIX if Homebrew is installed in a non-standard location."
-        );
-      }
-      throw err;
+function initializeSQLiteDatabase(db: IDatabase): void {
+  // Load sqlite-vec extension
+  const nativeDb = db.getNativeDatabase() as Database;
+  try {
+    sqliteVec.load(nativeDb);
+  } catch (err) {
+    if (err instanceof Error && err.message.includes("does not support dynamic extension loading")) {
+      throw new Error(
+        "SQLite build does not support dynamic extension loading. " +
+        "Install Homebrew SQLite so the sqlite-vec extension can be loaded, " +
+        "and set BREW_PREFIX if Homebrew is installed in a non-standard location."
+      );
     }
+    throw err;
   }
+  
   db.exec("PRAGMA journal_mode = WAL");
   db.exec("PRAGMA foreign_keys = ON");
 
@@ -572,19 +568,211 @@ function initializeDatabase(db: IDatabase): void {
   `);
 }
 
+/**
+ * Initialize the database with PostgreSQL-specific configuration.
+ * 
+ * @param db - PostgreSQL database instance
+ */
+function initializePostgresDatabase(db: IDatabase): void {
+  // Enable pgvector extension
+  db.exec(`CREATE EXTENSION IF NOT EXISTS vector`);
+
+  // Drop legacy tables that are now managed in YAML
+  db.exec(`DROP TABLE IF EXISTS path_contexts CASCADE`);
+  db.exec(`DROP TABLE IF EXISTS collections CASCADE`);
+
+  // Content-addressable storage - the source of truth for document content
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS content (
+      hash TEXT PRIMARY KEY,
+      doc TEXT NOT NULL,
+      created_at TIMESTAMP NOT NULL
+    )
+  `);
+
+  // Documents table - file system layer mapping virtual paths to content hashes
+  // Collections are now managed in ~/.config/qmd/index.yml
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS documents (
+      id SERIAL PRIMARY KEY,
+      collection TEXT NOT NULL,
+      path TEXT NOT NULL,
+      title TEXT NOT NULL,
+      hash TEXT NOT NULL,
+      created_at TIMESTAMP NOT NULL,
+      modified_at TIMESTAMP NOT NULL,
+      active BOOLEAN NOT NULL DEFAULT true,
+      FOREIGN KEY (hash) REFERENCES content(hash) ON DELETE CASCADE,
+      UNIQUE(collection, path)
+    )
+  `);
+
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_documents_collection ON documents(collection, active)`);
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_documents_hash ON documents(hash)`);
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_documents_path ON documents(path, active)`);
+
+  // Cache table for LLM API calls
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS llm_cache (
+      hash TEXT PRIMARY KEY,
+      result TEXT NOT NULL,
+      created_at TIMESTAMP NOT NULL
+    )
+  `);
+
+  // Content vectors
+  // Check if table exists and has correct schema
+  const tableExists = db.prepare(`
+    SELECT EXISTS (
+      SELECT FROM information_schema.tables 
+      WHERE table_schema = 'public' 
+      AND table_name = 'content_vectors'
+    ) as exists
+  `).get() as { exists: boolean } | null;
+  
+  if (tableExists?.exists) {
+    const hasSeqColumn = db.prepare(`
+      SELECT EXISTS (
+        SELECT FROM information_schema.columns 
+        WHERE table_schema = 'public' 
+        AND table_name = 'content_vectors'
+        AND column_name = 'seq'
+      ) as exists
+    `).get() as { exists: boolean } | null;
+    
+    if (!hasSeqColumn?.exists) {
+      db.exec(`DROP TABLE IF EXISTS content_vectors CASCADE`);
+      db.exec(`DROP TABLE IF EXISTS vectors CASCADE`);
+    }
+  }
+  
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS content_vectors (
+      hash TEXT NOT NULL,
+      seq INTEGER NOT NULL DEFAULT 0,
+      pos INTEGER NOT NULL DEFAULT 0,
+      model TEXT NOT NULL,
+      embedded_at TIMESTAMP NOT NULL,
+      PRIMARY KEY (hash, seq)
+    )
+  `);
+
+  // Full-text search using PostgreSQL GIN indexes
+  // Add tsvector column for full-text search
+  db.exec(`
+    DO $$ 
+    BEGIN
+      IF NOT EXISTS (
+        SELECT FROM information_schema.columns 
+        WHERE table_schema = 'public' 
+        AND table_name = 'documents'
+        AND column_name = 'fts_vector'
+      ) THEN
+        ALTER TABLE documents ADD COLUMN fts_vector tsvector;
+      END IF;
+    END $$
+  `);
+
+  // Create GIN index for full-text search
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_documents_fts ON documents USING GIN(fts_vector)`);
+
+  // Create function to update FTS vector
+  db.exec(`
+    CREATE OR REPLACE FUNCTION update_documents_fts()
+    RETURNS TRIGGER AS $$
+    BEGIN
+      IF NEW.active THEN
+        NEW.fts_vector := 
+          setweight(to_tsvector('english', COALESCE(NEW.collection || '/' || NEW.path, '')), 'A') ||
+          setweight(to_tsvector('english', COALESCE(NEW.title, '')), 'B') ||
+          setweight(to_tsvector('english', COALESCE((SELECT doc FROM content WHERE hash = NEW.hash), '')), 'C');
+      ELSE
+        NEW.fts_vector := NULL;
+      END IF;
+      RETURN NEW;
+    END;
+    $$ LANGUAGE plpgsql
+  `);
+
+  // Create trigger to keep FTS in sync
+  db.exec(`DROP TRIGGER IF EXISTS documents_fts_update ON documents`);
+  db.exec(`
+    CREATE TRIGGER documents_fts_update
+    BEFORE INSERT OR UPDATE ON documents
+    FOR EACH ROW
+    EXECUTE FUNCTION update_documents_fts()
+  `);
+}
+
+/**
+ * Initialize the database with appropriate configuration based on database type.
+ * Detects the database type by checking if it supports extensions (SQLite) or not (PostgreSQL).
+ * 
+ * @param db - Database instance
+ */
+function initializeDatabase(db: IDatabase): void {
+  if (db.supportsExtensions()) {
+    // SQLite database - supports dynamic extension loading
+    initializeSQLiteDatabase(db);
+  } else {
+    // PostgreSQL database - extensions loaded differently
+    initializePostgresDatabase(db);
+  }
+}
+
 
 function ensureVecTableInternal(db: IDatabase, dimensions: number): void {
-  const tableInfo = db.prepare(`SELECT sql FROM sqlite_master WHERE type='table' AND name='vectors_vec'`).get() as { sql: string } | null;
-  if (tableInfo) {
-    const match = tableInfo.sql.match(/float\[(\d+)\]/);
-    const hasHashSeq = tableInfo.sql.includes('hash_seq');
-    const hasCosine = tableInfo.sql.includes('distance_metric=cosine');
-    const existingDims = match?.[1] ? parseInt(match[1], 10) : null;
-    if (existingDims === dimensions && hasHashSeq && hasCosine) return;
-    // Table exists but wrong schema - need to rebuild
-    db.exec("DROP TABLE IF EXISTS vectors_vec");
+  if (db.supportsExtensions()) {
+    // SQLite with sqlite-vec
+    const tableInfo = db.prepare(`SELECT sql FROM sqlite_master WHERE type='table' AND name='vectors_vec'`).get() as { sql: string } | null;
+    if (tableInfo) {
+      const match = tableInfo.sql.match(/float\[(\d+)\]/);
+      const hasHashSeq = tableInfo.sql.includes('hash_seq');
+      const hasCosine = tableInfo.sql.includes('distance_metric=cosine');
+      const existingDims = match?.[1] ? parseInt(match[1], 10) : null;
+      if (existingDims === dimensions && hasHashSeq && hasCosine) return;
+      // Table exists but wrong schema - need to rebuild
+      db.exec("DROP TABLE IF EXISTS vectors_vec");
+    }
+    db.exec(`CREATE VIRTUAL TABLE vectors_vec USING vec0(hash_seq TEXT PRIMARY KEY, embedding float[${dimensions}] distance_metric=cosine)`);
+  } else {
+    // PostgreSQL with pgvector
+    const tableInfo = db.prepare(`
+      SELECT column_name, udt_name
+      FROM information_schema.columns
+      WHERE table_schema = 'public'
+      AND table_name = 'vectors'
+      AND column_name = 'embedding'
+    `).get() as { column_name: string; udt_name: string } | null;
+    
+    if (tableInfo) {
+      // Check if dimensions match
+      const dimInfo = db.prepare(`
+        SELECT atttypmod
+        FROM pg_attribute
+        WHERE attrelid = 'vectors'::regclass
+        AND attname = 'embedding'
+      `).get() as { atttypmod: number } | null;
+      
+      // atttypmod for vector type is dimensions + 4 (PostgreSQL internal)
+      const existingDims = dimInfo?.atttypmod ? dimInfo.atttypmod - 4 : null;
+      if (existingDims === dimensions) return;
+      
+      // Table exists but wrong schema - need to rebuild
+      db.exec("DROP TABLE IF EXISTS vectors CASCADE");
+    }
+    
+    // Create vectors table with pgvector
+    db.exec(`
+      CREATE TABLE vectors (
+        hash_seq TEXT PRIMARY KEY,
+        embedding vector(${dimensions})
+      )
+    `);
+    
+    // Create index for vector similarity search
+    db.exec(`CREATE INDEX IF NOT EXISTS idx_vectors_embedding ON vectors USING ivfflat (embedding vector_cosine_ops) WITH (lists = 100)`);
   }
-  db.exec(`CREATE VIRTUAL TABLE vectors_vec USING vec0(hash_seq TEXT PRIMARY KEY, embedding float[${dimensions}] distance_metric=cosine)`);
 }
 
 // =============================================================================
@@ -663,15 +851,29 @@ export type Store = {
 };
 
 /**
- * Create a new store instance with the given database path.
- * If no path is provided, uses the default path (~/.cache/qmd/index.sqlite).
+ * Create a new store instance with the given database path or from environment variables.
+ * If no path is provided and QMD_DB_TYPE is not set, uses the default SQLite path.
+ * If QMD_DB_TYPE=postgres, creates a PostgreSQL store using QMD_POSTGRES_* env vars.
  *
- * @param dbPath - Path to the SQLite database file
+ * @param dbPath - Path to the SQLite database file (ignored if using PostgreSQL)
  * @returns Store instance with all methods bound to the database
  */
 export function createStore(dbPath?: string): Store {
-  const resolvedPath = dbPath || getDefaultDbPath();
-  const db = createSQLiteDatabase(resolvedPath);
+  let db: IDatabase;
+  let resolvedPath: string;
+  
+  // Check if PostgreSQL is configured via environment
+  const dbType = Bun.env.QMD_DB_TYPE;
+  if (dbType === 'postgres') {
+    // Create PostgreSQL database from environment variables
+    db = createDatabaseFromEnv();
+    resolvedPath = 'postgres://' + (Bun.env.QMD_POSTGRES_HOST || 'localhost');
+  } else {
+    // Default to SQLite
+    resolvedPath = dbPath || getDefaultDbPath();
+    db = createSQLiteDatabase(resolvedPath);
+  }
+  
   initializeDatabase(db);
 
   return {
