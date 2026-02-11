@@ -395,49 +395,69 @@ function parseShellCommand(command: string): string[] {
   const args: string[] = [];
   let current = "";
   let inQuotes = false;
-  let quoteChar = "";
-  let escaped = false;
+  let currentQuoteChar = "";
+  let i = 0;
 
-  for (let i = 0; i < command.length; i++) {
+  while (i < command.length) {
     const char = command[i];
 
-    if (escaped) {
-      current += char;
-      escaped = false;
-      continue;
+    // Handle escape sequences
+    if (char === "\\" && i + 1 < command.length) {
+      const nextChar = command[i + 1];
+      // In quotes, only escape the quote character and backslash
+      if (inQuotes) {
+        if (nextChar === currentQuoteChar || nextChar === "\\") {
+          current += nextChar;
+          i += 2;
+          continue;
+        }
+      } else {
+        // Outside quotes, escape any character
+        current += nextChar;
+        i += 2;
+        continue;
+      }
     }
 
-    if (char === "\\") {
-      escaped = true;
-      continue;
-    }
-
+    // Handle quotes
     if (char === '"' || char === "'") {
       if (!inQuotes) {
         inQuotes = true;
-        quoteChar = char;
-      } else if (char === quoteChar) {
+        currentQuoteChar = char;
+      } else if (char === currentQuoteChar) {
         inQuotes = false;
-        quoteChar = "";
+        currentQuoteChar = "";
       } else {
+        // Different quote type while in quotes - add as literal
         current += char;
       }
+      i++;
       continue;
     }
 
+    // Handle spaces (argument separators when not in quotes)
     if (char === " " && !inQuotes) {
       if (current) {
         args.push(current);
         current = "";
       }
+      i++;
       continue;
     }
 
+    // Regular character
     current += char;
+    i++;
   }
 
+  // Add final argument if any
   if (current) {
     args.push(current);
+  }
+
+  // Warn about unclosed quotes (but still return the parsed args)
+  if (inQuotes) {
+    console.error(`${c.yellow}Warning: Unclosed quote (${currentQuoteChar}) in command${c.reset}`);
   }
 
   return args;
