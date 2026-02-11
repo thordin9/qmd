@@ -12,7 +12,7 @@
  *   QMD_POSTGRES_PASSWORD=qmd_password
  */
 
-import { describe, test, expect, beforeAll, afterAll, beforeEach, afterEach } from "bun:test";
+import { describe, test, expect, beforeAll, beforeEach, afterEach } from "bun:test";
 import { 
   createDatabase, 
   createPostgresDatabase,

@@ -70,10 +70,10 @@ QMD now supports both SQLite and PostgreSQL through its database abstraction lay
 #### PostgreSQL Implementation
 
 PostgreSQL support includes:
-- Connection pooling via `pg` driver
+- Process-based execution via `psql` CLI tool
 - pgvector extension for vector similarity search
 - Compatible schema with SQLite for seamless migration
-- Uses top-level await in Bun for synchronous interface over async operations
+- Synchronous operations using Bun.spawnSync (no async interface needed)
 
 **Configuration:**
 
@@ -88,7 +88,6 @@ const db = createPostgresDatabase({
   user: 'qmd_user',
   password: 'qmd_password',
   ssl: false,
-  max: 10, // connection pool size
 });
 
 // From environment variables
@@ -100,8 +99,8 @@ const db = createDatabaseFromEnv(); // Reads QMD_DB_TYPE, QMD_POSTGRES_* vars
 1. **Parameter Binding:** PostgreSQL uses `$1, $2, $3` instead of `?` for placeholders
 2. **Vector Extension:** Uses pgvector instead of sqlite-vec
 3. **Full-Text Search:** Uses GIN indexes with to_tsvector instead of FTS5
-4. **Connection Model:** Connection pooling instead of direct file access
-5. **Async Handling:** Uses Bun's top-level await for synchronous interface
+4. **Connection Model:** Each query spawns a new psql process (no persistent connections)
+5. **Execution:** Uses psql CLI via Bun.spawnSync for synchronous operations
 
 #### Adding Other Database Backends
 

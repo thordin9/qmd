@@ -20,10 +20,7 @@ import type { IDatabase } from "./database";
 
 // Skip evaluation tests when mock mode is enabled
 const isMockMode = Bun.env.QMD_MOCK_LLM === "true" || Bun.env.CI === "true";
-if (isMockMode) {
-  console.log("Skipping eval.test.ts - mock mode enabled");
-  process.exit(0);
-}
+const describeIfReal = isMockMode ? describe.skip : describe;
 
 // Set INDEX_PATH before importing store to prevent using global index
 const tempDir = mkdtempSync(join(tmpdir(), "qmd-eval-"));
@@ -106,7 +103,7 @@ function calcHitRate(
 // BM25 (Lexical) Tests - Fast, no model loading needed
 // =============================================================================
 
-describe("BM25 Search (FTS)", () => {
+describeIfReal("BM25 Search (FTS)", () => {
   let store: ReturnType<typeof createStore>;
   let db: IDatabase;
 
@@ -161,7 +158,7 @@ describe("BM25 Search (FTS)", () => {
 // Vector Search Tests - Requires embedding model
 // =============================================================================
 
-describe("Vector Search", () => {
+describeIfReal("Vector Search", () => {
   let store: ReturnType<typeof createStore>;
   let db: IDatabase;
   let hasEmbeddings = false;
@@ -273,7 +270,7 @@ describe("Vector Search", () => {
 // Hybrid Search (RRF) Tests - Combines BM25 + Vector
 // =============================================================================
 
-describe("Hybrid Search (RRF)", () => {
+describeIfReal("Hybrid Search (RRF)", () => {
   let store: ReturnType<typeof createStore>;
   let db: IDatabase;
   let hasVectors = false;

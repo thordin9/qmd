@@ -680,12 +680,17 @@ function initializePostgresDatabase(db: IDatabase): void {
   db.exec(`
     CREATE OR REPLACE FUNCTION update_documents_fts()
     RETURNS TRIGGER AS $$
+    DECLARE
+      v_doc text;
     BEGIN
       IF NEW.active THEN
+        -- Cache document content to avoid repeated subqueries
+        SELECT doc INTO v_doc FROM content WHERE hash = NEW.hash;
+        
         NEW.fts_vector := 
           setweight(to_tsvector('english', COALESCE(NEW.collection || '/' || NEW.path, '')), 'A') ||
           setweight(to_tsvector('english', COALESCE(NEW.title, '')), 'B') ||
-          setweight(to_tsvector('english', COALESCE((SELECT doc FROM content WHERE hash = NEW.hash), '')), 'C');
+          setweight(to_tsvector('english', COALESCE(v_doc, '')), 'C');
       ELSE
         NEW.fts_vector := NULL;
       END IF;

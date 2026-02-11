@@ -300,17 +300,17 @@ To complete PostgreSQL support:
 
 1. **Connection strings** - Never commit passwords to git
 2. **SSL/TLS** - Recommended for production deployments
-3. **Connection pooling** - Configured with sensible defaults (max: 10 connections)
-4. **SQL injection** - All queries use parameterized statements
+3. **Process isolation** - Each query runs in its own `psql` process; no persistent connections
+4. **SQL injection** - Parameters are escaped and substituted into SQL
 5. **Permissions** - Use principle of least privilege for database user
 
 ## Performance Considerations
 
-1. **Connection pooling** - Reuses connections for better performance
+1. **Process-per-query model** - Each operation spawns a fresh `psql` process; no connection pooling, which adds process startup overhead but simplifies failure isolation
 2. **Indexes** - Automatically created on critical columns
 3. **Vector search** - Uses IVFFlat index (configurable lists parameter)
 4. **FTS** - GIN index provides fast full-text search
-5. **Prepared statements** - Not yet implemented, would improve performance
+5. **Prepared statements** - Not used, as the implementation does not maintain persistent connections; could be revisited if a pooled driver is introduced
 
 ## Conclusion
 

@@ -311,13 +311,72 @@ class PostgresStatement implements IStatement {
     
     // Substitute parameters in SQL (simple positional replacement)
     let parameterizedSql = sql;
-    for (let i = 0; i < params.length; i++) {
-      const param = params[i];
-      const value = param === null ? 'NULL' : 
-                    typeof param === 'string' ? `'${param.replace(/'/g, "''")}'` :
-                    typeof param === 'boolean' ? (param ? 'true' : 'false') :
-                    String(param);
-      parameterizedSql = parameterizedSql.replace(new RegExp(`\\$${i + 1}\\b`), value);
+    const substitutions: Array<{ placeholder: string; value: string; position: number }> = [];
+    
+    // Find all placeholders and their positions
+    const placeholderRegex = /\$(\d+)\b/g;
+    let match;
+    while ((match = placeholderRegex.exec(sql)) !== null) {
+      const paramIndex = Number(match[1]) - 1;
+      if (paramIndex >= 0 && paramIndex < params.length) {
+        substitutions.push({
+          placeholder: match[0],
+          value: '', // Will be filled below
+          position: match.index,
+        });
+      }
+    }
+    
+    // Sort by position (descending) so we can replace from end to start
+    substitutions.sort((a, b) => b.position - a.position);
+    
+    // Build SQL by replacing placeholders from end to start
+    for (const sub of substitutions) {
+      const paramIndex = Number(sub.placeholder.slice(1)) - 1;
+      const param = params[paramIndex];
+      let value: string;
+
+      if (param === null || param === undefined) {
+        value = 'NULL';
+      } else if (typeof param === 'string') {
+        // Escape single quotes in strings
+        value = `'${param.replace(/'/g, "''")}'`;
+      } else if (typeof param === 'boolean') {
+        value = param ? 'true' : 'false';
+      } else if (
+        Array.isArray(param) ||
+        param instanceof Float32Array ||
+        param instanceof Float64Array ||
+        param instanceof Int8Array ||
+        param instanceof Uint8Array ||
+        param instanceof Int16Array ||
+        param instanceof Uint16Array ||
+        param instanceof Int32Array ||
+        param instanceof Uint32Array
+      ) {
+        // Convert arrays and typed arrays to PostgreSQL array literal
+        const elements = Array.from(param as ArrayLike<number>).map((v) => {
+          if (v === null || v === undefined) {
+            return 'NULL';
+          }
+          if (typeof v === 'number') {
+            return Number.isFinite(v) ? String(v) : 'NULL';
+          }
+          return String(v);
+        });
+        value = `'[${elements.join(',')}]'`;
+      } else if (typeof param === 'number') {
+        value = String(param);
+      } else {
+        // Fallback for other types
+        value = String(param);
+      }
+      
+      // Replace this specific placeholder occurrence
+      parameterizedSql = 
+        parameterizedSql.slice(0, sub.position) +
+        value +
+        parameterizedSql.slice(sub.position + sub.placeholder.length);
     }
     
     // Execute via psql with -A (unaligned) -F '|' (pipe delimiter) and get column headers
@@ -371,16 +430,17 @@ class PostgresStatement implements IStatement {
           const header = headers[j];
           let value: unknown = j < values.length ? values[j] : '';
           
-          // Try to convert to appropriate type
+          // Convert to appropriate type
+          // Note: We're conservative with number conversion to avoid converting string IDs
           if (value === '' || value === null) {
             value = null;
           } else if (value === 't') {
             value = true;
           } else if (value === 'f') {
             value = false;
-          } else if (!isNaN(Number(value)) && value !== '') {
-            value = Number(value);
           }
+          // Note: We don't auto-convert numeric strings to numbers as they could be IDs/hashes
+          // PostgreSQL will return actual numbers as numbers through its type system
           
           row[header] = value;
         }
