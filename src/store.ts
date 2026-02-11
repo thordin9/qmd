@@ -280,7 +280,7 @@ export function getDefaultDbPath(indexName: string = "index"): string {
 
   const cacheDir = Bun.env.XDG_CACHE_HOME || resolve(homedir(), ".cache");
   const qmdCacheDir = resolve(cacheDir, "qmd");
-  try { Bun.spawnSync(["mkdir", "-p", qmdCacheDir]); } catch { }
+  try { Bun.spawnSync(["mkdir", "-p", qmdCacheDir], { env: process.env }); } catch { }
   return resolve(qmdCacheDir, `${indexName}.sqlite`);
 }
 

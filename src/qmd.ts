@@ -385,6 +385,89 @@ function showStatus(): void {
   closeDb();
 }
 
+/**
+ * Parse a simple shell command into an array of arguments for direct execution.
+ * Handles quoted strings and escapes. For simple commands like:
+ *   osascript -l JavaScript "file.js" "arg with spaces" arg
+ * Returns: ["osascript", "-l", "JavaScript", "file.js", "arg with spaces", "arg"]
+ */
+function parseShellCommand(command: string): string[] {
+  const args: string[] = [];
+  let current = "";
+  let inQuotes = false;
+  let currentQuoteChar = "";
+  let i = 0;
+
+  while (i < command.length) {
+    const char = command[i];
+
+    // Handle escape sequences
+    if (char === "\\" && i + 1 < command.length) {
+      const nextChar = command[i + 1];
+      // In quotes, only escape the quote character and backslash
+      if (inQuotes) {
+        if (nextChar === currentQuoteChar || nextChar === "\\") {
+          current += nextChar;
+          i += 2;
+          continue;
+        }
+        // Not an escape sequence in quotes, keep the backslash
+        current += char;
+        i++;
+        continue;
+      } else {
+        // Outside quotes, escape any character
+        current += nextChar;
+        i += 2;
+        continue;
+      }
+    }
+
+    // Handle quotes
+    if (char === '"' || char === "'") {
+      if (!inQuotes) {
+        inQuotes = true;
+        currentQuoteChar = char;
+      } else if (char === currentQuoteChar) {
+        inQuotes = false;
+        currentQuoteChar = "";
+      } else {
+        // Different quote type while in quotes - add as literal
+        current += char;
+      }
+      i++;
+      continue;
+    }
+
+    // Handle spaces (argument separators when not in quotes)
+    if (char === " " && !inQuotes) {
+      if (current) {
+        args.push(current);
+        current = "";
+      }
+      i++;
+      continue;
+    }
+
+    // Regular character
+    current += char;
+    i++;
+  }
+
+  // Add final argument if any
+  if (current) {
+    args.push(current);
+  }
+
+  // Warn about unclosed quotes (but still return the parsed args)
+  // We continue execution as the command might still work - e.g., trailing quote at end
+  if (inQuotes) {
+    console.warn(`${c.yellow}Warning: Unclosed quote (${currentQuoteChar}) in command: ${command}${c.reset}`);
+  }
+
+  return args;
+}
+
 async function updateCollections(): Promise<void> {
   const db = getDb();
   // Collections are defined in YAML; no duplicate cleanup needed.
@@ -413,15 +496,93 @@ async function updateCollections(): Promise<void> {
     if (yamlCol?.update) {
       console.log(`${c.dim}    Running update command: ${yamlCol.update}${c.reset}`);
       try {
-        const proc = Bun.spawn(["/usr/bin/env", "bash", "-c", yamlCol.update], {
-          cwd: col.pwd,
-          stdout: "pipe",
-          stderr: "pipe",
-        });
+        // Parse command to execute directly without shell
+        // This avoids posix_spawn issues with shells on some macOS systems
+        // Note: This does not support shell features like pipes (|), redirects (>),
+        // environment variable expansion ($VAR), or command substitution ($(cmd))
+        // The OSX Notes update command is a simple osascript invocation which works fine
+        
+        // Normalize osascript path for backward compatibility with existing collections
+        // Collections created before absolute path fix may have 'osascript' instead of '/usr/bin/osascript'
+        let normalizedCommand = yamlCol.update;
+        if (normalizedCommand.startsWith('osascript ')) {
+          normalizedCommand = '/usr/bin/osascript' + normalizedCommand.substring('osascript'.length);
+        }
+        
+        const cmdParts = parseShellCommand(normalizedCommand);
+        
+        if (cmdParts.length === 0) {
+          console.error(`${c.yellow}✗ Update command is empty${c.reset}`);
+          process.exit(1);
+        }
+        
+        let result;
+        let output = "";
+        let errorOutput = "";
+        let exitCode: number | null = null;  // null indicates execution failure
+        
+        // Try direct execution first
+        try {
+          result = Bun.spawnSync(cmdParts, {
+            cwd: col.pwd,
+            env: process.env,
+            stdout: "pipe",
+            stderr: "pipe",
+          });
+          output = result.stdout?.toString() || "";
+          errorOutput = result.stderr?.toString() || "";
+          exitCode = result.exitCode;
+        } catch (spawnError: any) {
+          // If spawnSync fails (often permission/entitlement issues on macOS),
+          // try using Bun's $ shell API which may have different permissions
+          console.log(`${c.dim}    Attempting fallback method...${c.reset}`);
+          try {
+            // Note: normalizedCommand comes from YAML config (user-controlled), not external input
+            const shellResult = await $`${normalizedCommand}`.cwd(col.pwd).env(process.env).quiet();
+            output = shellResult.stdout?.toString() || "";
+            errorOutput = shellResult.stderr?.toString() || "";
+            exitCode = shellResult.exitCode;
+          } catch (shellError: any) {
+            // If Bun.$ also fails, try executing via /bin/sh wrapper
+            // This works around Bun entitlement restrictions where the shell can execute
+            // binaries that Bun cannot directly spawn (even though terminal can run them)
+            console.log(`${c.dim}    Attempting shell wrapper method...${c.reset}`);
+            try {
+              // Note: normalizedCommand is from YAML config which is user-controlled and trusted
+              // This is the last-resort fallback when Bun's entitlements prevent direct execution
+              result = Bun.spawnSync(["/bin/sh", "-c", normalizedCommand], {
+                cwd: col.pwd,
+                env: process.env,
+                stdout: "pipe",
+                stderr: "pipe",
+              });
+              output = result.stdout?.toString() || "";
+              errorOutput = result.stderr?.toString() || "";
+              exitCode = result.exitCode;
+            } catch (shellWrapperError: any) {
+              // All three methods failed - provide helpful error
+              let errorMsg = `All execution methods failed.\nDirect: ${spawnError.message}\nShell API: ${shellError.message}\nShell wrapper: ${shellWrapperError.message}\n\n`;
+              
+              // Check error code directly (more reliable than string matching)
+              if (spawnError.code === 'ENOENT' || spawnError.code === 'EACCES') {
+                errorMsg += `This may be a macOS permission issue. Try:\n1. Grant Terminal/Bun "Full Disk Access" in System Settings > Privacy & Security\n2. Restart Terminal/IDE after granting permissions`;
+              } else {
+                errorMsg += `Possible causes:\n1. Command syntax error in YAML config\n2. Missing or inaccessible binary\n3. macOS permission restrictions`;
+              }
+              
+              throw new Error(errorMsg);
+            }
+          }
+        }
 
-        const output = await new Response(proc.stdout).text();
-        const errorOutput = await new Response(proc.stderr).text();
-        const exitCode = await proc.exited;
+        // Check if command actually executed (exitCode should be a number)
+        if (exitCode === null) {
+          console.log(`${c.yellow}✗ Update command failed to execute${c.reset}`);
+          if (errorOutput.trim()) {
+            console.log(errorOutput.trim().split('\n').map(l => `    ${l}`).join('\n'));
+          }
+          process.exit(1);
+        }
 
         if (output.trim()) {
           console.log(output.trim().split('\n').map(l => `    ${l}`).join('\n'));
@@ -1322,6 +1483,64 @@ async function collectionAdd(pwd: string, globPattern: string, name?: string): P
   console.log(`${c.green}✓${c.reset} Collection '${collName}' created successfully`);
 }
 
+async function collectionAddOSXNotes(name: string, account: string): Promise<void> {
+  // Validate collection name
+  const { isValidCollectionName } = await import("./collections.js");
+  if (!isValidCollectionName(name)) {
+    console.error(`${c.yellow}Invalid collection name: ${name}${c.reset}`);
+    console.error(`Collection names must contain only alphanumeric characters, hyphens, and underscores.`);
+    process.exit(1);
+  }
+
+  // Check if collection with this name already exists
+  const existing = getCollectionFromYaml(name);
+  if (existing) {
+    console.error(`${c.yellow}Collection '${name}' already exists.${c.reset}`);
+    console.error(`Use a different name with --name <name> or remove it first with 'qmd collection remove ${name}'`);
+    process.exit(1);
+  }
+
+  // Create temporary directory for OSX notes export
+  const cacheDir = Bun.env.XDG_CACHE_HOME || `${homedir()}/.cache`;
+  const osxNotesDir = `${cacheDir}/qmd/osx-notes/${name}`;
+
+  // Get the path to the export script
+  const scriptPath = `${import.meta.dir}/../scripts/export-osx-notes.js`;
+
+  if (!existsSync(scriptPath)) {
+    console.error(`${c.red}Export script not found: ${scriptPath}${c.reset}`);
+    console.error(`Please ensure the export-osx-notes.js script is installed.`);
+    process.exit(1);
+  }
+
+  // Build the update command that will be run on qmd update
+  // Use absolute path to osascript to avoid PATH lookup issues
+  const updateCommand = `/usr/bin/osascript -l JavaScript "${scriptPath}" "${osxNotesDir}" ${account}`;
+
+  // Add collection to YAML config with update command
+  const { addCollection } = await import("./collections.js");
+  addCollection(name, osxNotesDir, "**/*.md");
+
+  // Now add the update command to the collection
+  const { loadConfig, saveConfig } = await import("./collections.js");
+  const config = loadConfig();
+  if (config.collections[name]) {
+    config.collections[name].update = updateCommand;
+
+    // Add context to indicate this is from OSX Notes
+    config.collections[name].context = {
+      "/": `OSX Notes exported from ${account === 'all' ? 'all accounts' : `account: ${account}`}. Source: macOS Notes.app`
+    };
+
+    saveConfig(config);
+  }
+
+  console.log(`${c.green}✓${c.reset} Collection '${name}' configured for OSX Notes`);
+  console.log(`  Account filter: ${account}`);
+  console.log(`  Export directory: ${osxNotesDir}`);
+  console.log(`\nRun ${c.cyan}qmd update${c.reset} to export and index notes from OSX Notes.app`);
+}
+
 function collectionRemove(name: string): void {
   // Check if collection exists in YAML
   const coll = getCollectionFromYaml(name);
@@ -2109,6 +2328,7 @@ function parseCLI() {
       // Collection options
       name: { type: "string" },  // collection name
       mask: { type: "string" },  // glob pattern
+      account: { type: "string" },  // OSX Notes account filter
       // Embed options
       force: { type: "boolean", short: "f" },
       // Update options
@@ -2170,6 +2390,7 @@ function parseCLI() {
 function showHelp(): void {
   console.log("Usage:");
   console.log("  qmd collection add [path] --name <name> --mask <pattern>  - Create/index collection");
+  console.log("  qmd collection add-osx-notes --name <name> [--account <account|all>]  - Create collection from OSX Notes");
   console.log("  qmd collection list           - List all collections with details");
   console.log("  qmd collection remove <name>  - Remove a collection by name");
   console.log("  qmd collection rename <old> <new>  - Rename a collection");
@@ -2386,9 +2607,31 @@ if (import.meta.main) {
           break;
         }
 
+        case "add-osx-notes": {
+          const name = cli.values.name as string | undefined;
+          const account = (cli.values.account as string) || 'all';
+
+          if (!name) {
+            console.error("Usage: qmd collection add-osx-notes --name <name> [--account <account|all>]");
+            console.error("");
+            console.error("Options:");
+            console.error("  --name <name>        - Collection name (required)");
+            console.error("  --account <account>  - Filter to specific account (default: all)");
+            console.error("");
+            console.error("Examples:");
+            console.error("  qmd collection add-osx-notes --name osxnotes");
+            console.error("  qmd collection add-osx-notes --name osxnotes --account iCloud");
+            console.error("  qmd collection add-osx-notes --name osxnotes --account all");
+            process.exit(1);
+          }
+
+          await collectionAddOSXNotes(name, account);
+          break;
+        }
+
         default:
           console.error(`Unknown subcommand: ${subcommand}`);
-          console.error("Available: list, add, remove, rename");
+          console.error("Available: list, add, remove, rename, add-osx-notes");
           process.exit(1);
       }
       break;
@@ -2502,6 +2745,7 @@ if (import.meta.main) {
           const logPath = resolve(cacheDir, "mcp.log");
           const logFd = openSync(logPath, "w"); // truncate — fresh log per daemon run
           const child = Bun.spawn([process.execPath, import.meta.path, "mcp", "--http", "--port", String(port)], {
+            env: process.env,
             stdout: logFd,
             stderr: logFd,
             stdin: "ignore",
