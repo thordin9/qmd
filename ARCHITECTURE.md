@@ -144,6 +144,32 @@ The Store uses the `IDatabase` interface internally, making it database-agnostic
 - **sqlite-vec** - Vector similarity search with cosine distance
 - **FTS5** - Full-text search with Porter stemming and Unicode support
 
+## LLM Provider Abstraction
+
+QMD supports multiple LLM providers for embeddings, query expansion, and reranking through a pluggable provider system controlled by the `QMD_LLM_PROVIDER` environment variable:
+
+### Providers
+
+1. **Local (default)** - Uses node-llama-cpp with GGUF models
+   - Models: embeddinggemma (300MB), qwen3-reranker (600MB), qmd-query-expansion (1.1GB)
+   - Models downloaded from HuggingFace and cached locally
+   - No API keys required
+   - Full privacy - all processing on-device
+
+2. **OpenRouter** - Cloud-based inference via OpenRouter API
+   - Requires `QMD_OPENROUTER_API_KEY`
+   - Default models: text-embedding-3-small, gpt-4o-mini
+   - Configuration: `QMD_OPENROUTER_BASE_URL`, model overrides
+
+3. **Ollama** - Local or remote Ollama inference
+   - Default endpoint: http://localhost:11434
+   - Default models: nomic-embed-text, llama3.2
+   - Optional authentication via `QMD_OLLAMA_API_KEY`
+   - Configuration: `QMD_OLLAMA_BASE_URL`, model overrides
+   - Models auto-downloaded by Ollama on first use
+
+All providers implement the same `LLM` interface with methods for `embed()`, `embedBatch()`, `generate()`, `expandQuery()`, and `rerank()`, allowing seamless switching between providers.
+
 ## Future Considerations
 
 While SQLite is the default and recommended database for QMD's use case, the abstraction layer allows for:

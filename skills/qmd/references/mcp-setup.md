@@ -13,7 +13,31 @@ Add to `~/.claude/settings.json`:
   "mcpServers": {
     "qmd": {
       "command": "qmd",
-      "args": ["mcp"]
+      "args": ["mcp"],
+      "env": {
+        "QMD_LLM_PROVIDER": "local"
+      }
+    }
+  }
+}
+```
+
+**LLM Provider Options:**
+- `"local"` (default) - Uses local GGUF models via node-llama-cpp
+- `"openrouter"` - Uses OpenRouter API (requires `QMD_OPENROUTER_API_KEY`)
+- `"ollama"` - Uses Ollama (local or remote, configure `QMD_OLLAMA_BASE_URL`)
+
+Example with Ollama:
+```json
+{
+  "mcpServers": {
+    "qmd": {
+      "command": "qmd",
+      "args": ["mcp"],
+      "env": {
+        "QMD_LLM_PROVIDER": "ollama",
+        "QMD_OLLAMA_BASE_URL": "http://localhost:11434"
+      }
     }
   }
 }

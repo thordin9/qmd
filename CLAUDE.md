@@ -126,9 +126,17 @@ bun link               # Install globally as 'qmd'
 
 - SQLite FTS5 for full-text search (BM25)
 - sqlite-vec for vector similarity search
-- node-llama-cpp for embeddings (embeddinggemma), reranking (qwen3-reranker), and query expansion (Qwen3)
+- Pluggable LLM providers:
+  - **local** (default): node-llama-cpp with GGUF models (embeddinggemma, qwen3-reranker, qmd-query-expansion)
+  - **openrouter**: Cloud-based inference via OpenRouter API
+  - **ollama**: Local or remote Ollama (configurable endpoint)
 - Reciprocal Rank Fusion (RRF) for combining results
 - Token-based chunking: 800 tokens/chunk with 15% overlap
+
+**Provider Configuration:**
+- Set `QMD_LLM_PROVIDER` to `local`, `openrouter`, or `ollama`
+- Ollama: `QMD_OLLAMA_BASE_URL` (default: http://localhost:11434)
+- OpenRouter: `QMD_OPENROUTER_API_KEY` required
 
 ## Important: Do NOT run automatically
 

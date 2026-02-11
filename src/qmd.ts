@@ -2193,7 +2193,10 @@ function showHelp(): void {
   console.log("");
   console.log("Global options:");
   console.log("  --index <name>             - Use custom index name (default: index)");
-  console.log("  Env: QMD_LLM_PROVIDER=openrouter - Use OpenRouter instead of local GGUF models");
+  console.log("  Env: QMD_LLM_PROVIDER      - Choose provider: local (default), openrouter, or ollama");
+  console.log("       QMD_OPENROUTER_API_KEY - OpenRouter API key");
+  console.log("       QMD_OLLAMA_BASE_URL    - Ollama endpoint (default: http://localhost:11434)");
+  console.log("       QMD_OLLAMA_API_KEY     - Ollama API key (optional for cloud endpoints)");
   console.log("");
   console.log("Search options:");
   console.log("  -n <num>                   - Number of results (default: 5, or 20 for --files)");
