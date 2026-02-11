@@ -1833,9 +1833,15 @@ function getDefaultOllamaLLM(): OllamaLLM {
 }
 
 /**
- * Get the default LLM instance (local, OpenRouter, or Ollama based on QMD_LLM_PROVIDER).
+ * Get the default LLM instance (local, OpenRouter, Ollama, or Mock based on environment).
  */
 export function getDefaultLLM(): LLM {
+  // Check if mock mode is enabled
+  if (Bun.env.QMD_MOCK_LLM === "true" || Bun.env.CI === "true") {
+    const { getMockLLM } = require("./llm.mock.js");
+    return getMockLLM();
+  }
+  
   const provider = normalizeProvider(process.env.QMD_LLM_PROVIDER);
   if (defaultLLM && defaultLLMProvider === provider) {
     return defaultLLM;

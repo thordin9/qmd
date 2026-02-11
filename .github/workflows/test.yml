@@ -48,6 +48,7 @@ jobs:
       run: bun test src/database.test.ts
       env:
         INDEX_PATH: /tmp/test-qmd.sqlite
+        QMD_MOCK_LLM: "true"
 
     - name: Run PostgreSQL tests
       run: bun test src/database.postgres.test.ts
@@ -58,6 +59,7 @@ jobs:
         QMD_POSTGRES_DB: qmd
         QMD_POSTGRES_USER: qmd_user
         QMD_POSTGRES_PASSWORD: qmd_password
+        QMD_MOCK_LLM: "true"
 
     - name: Run all tests
       run: bun test
@@ -69,3 +71,4 @@ jobs:
         QMD_POSTGRES_DB: qmd
         QMD_POSTGRES_USER: qmd_user
         QMD_POSTGRES_PASSWORD: qmd_password
+        QMD_MOCK_LLM: "true"
