@@ -40,6 +40,18 @@ export function formatDocForEmbedding(text: string, title?: string): string {
 }
 
 // =============================================================================
+// Error Checking Utilities
+// =============================================================================
+
+/**
+ * Type guard to check if an error is an AbortError from AbortController.
+ * DOMException uses the name property to identify error types.
+ */
+function isAbortError(error: unknown): boolean {
+  return error !== null && typeof error === 'object' && 'name' in error && error.name === 'AbortError';
+}
+
+// =============================================================================
 // Types
 // =============================================================================
 
@@ -638,8 +650,8 @@ export class OpenRouterLLM implements LLM {
       return parseExpandedQueryLines(content, query, includeLexical);
     } catch (error) {
       // Query expansion is optional - use fallback on error
-      if (error && typeof error === 'object' && 'name' in error && error.name === 'AbortError') {
-        process.stderr.write("Note: Query expansion timed out, using fallback (original query only)\n");
+      if (isAbortError(error)) {
+        console.warn("Note: Query expansion timed out, using fallback (original query only)");
       } else {
         console.error("OpenRouter query expansion error:", error);
       }
@@ -924,9 +936,9 @@ export class OllamaLLM implements LLM {
     } catch (error) {
       // Query expansion is optional - use fallback on error
       // Common causes: model loading timeout, network issues, model not available
-      if (error && typeof error === 'object' && 'name' in error && error.name === 'AbortError') {
+      if (isAbortError(error)) {
         // Timeout - likely due to slow model loading or network
-        process.stderr.write("Note: Query expansion timed out, using fallback (original query only)\n");
+        console.warn("Note: Query expansion timed out, using fallback (original query only)");
       } else {
         // Other error - log it for debugging
         console.error("Ollama query expansion error:", error);
