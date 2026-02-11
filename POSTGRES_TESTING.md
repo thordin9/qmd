@@ -2,9 +2,11 @@
 
 This docker-compose setup provides a PostgreSQL instance with the pgvector extension for testing QMD's PostgreSQL support.
 
-## Current Status
+## Requirements
 
-⚠️ **Note**: PostgreSQL support is currently in development. The database abstraction layer provides the foundation, but full integration requires refactoring the synchronous database interface to support async operations. The infrastructure (schema, vector tables, connection pooling) is complete and ready for testing once the async refactoring is done.
+- Docker or Docker Compose
+- `psql` command-line client (install via `postgresql-client` package)
+- Bun runtime
 
 ## Quick Start
 

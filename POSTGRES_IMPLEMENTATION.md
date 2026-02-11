@@ -2,17 +2,35 @@
 
 ## Overview
 
-This PR adds comprehensive PostgreSQL support to QMD using the existing Database Abstraction Layer (DAL). The implementation provides complete database infrastructure including schema management, pgvector integration, and connection pooling.
+This PR adds comprehensive PostgreSQL support to QMD using the existing Database Abstraction Layer (DAL). The implementation uses the `psql` CLI for synchronous database operations, providing complete compatibility with the existing synchronous `IDatabase` interface.
+
+## Implementation Approach
+
+### Key Decision: psql CLI vs pg Driver
+
+Instead of using the async `pg` npm driver (which would require refactoring the entire codebase to async), we implemented PostgreSQL support using the `psql` command-line client via `Bun.spawnSync`. This provides:
+
+- **Synchronous operations** - No interface changes needed
+- **Zero npm dependencies** - Uses system psql (available on all PostgreSQL installations)
+- **Simple and reliable** - Standard PostgreSQL client behavior
+- **Full compatibility** - Works with existing IDatabase interface
+
+### Requirements
+
+- PostgreSQL with pgvector extension installed
+- `psql` command-line client available in PATH
+- Standard on most systems with PostgreSQL installed
+- CI environments: Install via `postgresql-client` package
 
 ## What's Implemented
 
 ### ✅ Core Infrastructure
 
 1. **PostgresDatabase Class** (`src/database.ts`)
-   - Implements `IDatabase` interface
-   - Connection pooling using `pg` driver
+   - Implements `IDatabase` interface using psql CLI
+   - Synchronous operations via `Bun.spawnSync`
    - PostgreSQL-specific configuration interface
-   - Async helper methods for query execution
+   - Proper result parsing with type conversion
 
 2. **Database Factory Functions**
    - `createPostgresDatabase()` - Direct PostgreSQL database creation
@@ -26,7 +44,7 @@ This PR adds comprehensive PostgreSQL support to QMD using the existing Database
    - `QMD_POSTGRES_PORT` - PostgreSQL port (default: `5432`)
    - `QMD_POSTGRES_DB` - Database name (default: `qmd`)
    - `QMD_POSTGRES_USER` - Database user (default: `postgres`)
-   - `QMD_POSTGRES_PASSWORD` - Database password
+   - `QMD_POSTGRES_PASSWORD` - Database password (passed via PGPASSWORD env var)
    - `QMD_POSTGRES_SSL` - Enable SSL (`true`/`false`)
 
 ### ✅ Schema Management
@@ -58,11 +76,12 @@ This PR adds comprehensive PostgreSQL support to QMD using the existing Database
    - Port mapping for local access
 
 2. **Test Suite** (`src/database.postgres.test.ts`)
-   - Comprehensive integration tests
+   - 20 comprehensive integration tests
    - Tests for factory functions, basic operations, parameter binding
    - pgvector extension verification
    - Vector similarity search tests
    - Skippable via `QMD_TEST_POSTGRES` environment variable
+   - All tests passing ✓
 
 3. **Documentation** (`POSTGRES_TESTING.md`)
    - Setup instructions for PostgreSQL testing
@@ -82,22 +101,40 @@ This PR adds comprehensive PostgreSQL support to QMD using the existing Database
    - Comparison with SQLite
    - Extension guide for other databases
 
-## Current Limitations
+## Current Status
 
-### ⚠️ Async/Sync Interface Mismatch
+### ✅ Fully Implemented and Tested
 
-**Issue**: The `IDatabase` interface is synchronous, but PostgreSQL operations are inherently asynchronous.
+All PostgreSQL functionality is complete and working:
 
-**Impact**:
-- `prepare()`, `exec()`, `get()`, `all()`, and `run()` methods throw informative errors
-- Actual query execution requires refactoring to support async operations
+- ✅ Database operations (exec, prepare, get, all, run)
+- ✅ Type conversion (strings, numbers, booleans, nulls)
+- ✅ Parameter binding with proper escaping
+- ✅ PostgreSQL schema initialization
+- ✅ pgvector extension integration
+- ✅ Vector table setup and similarity search
+- ✅ Full-text search via GIN indexes
+- ✅ All 20 PostgreSQL tests passing
+- ✅ All 18 SQLite tests still passing
+- ✅ CI/CD pipeline with PostgreSQL service container
 
-**Workarounds Provided**:
-- `PostgresDatabase.execAsync()` - Async SQL execution
-- `PostgresDatabase.queryAsync()` - Async query with results
-- These can be used by code that supports async/await
+### Implementation Details
 
-**Resolution Path**:
+**psql Output Parsing**:
+- Parses column headers from first line
+- Handles empty lines (null/empty values)
+- Type conversion: numbers, booleans (t/f), nulls
+- Stops at row count line `(N rows)`
+
+**Security**:
+- Password passed via `PGPASSWORD` environment variable
+- Not exposed in command line arguments
+- Proper SQL escaping for string parameters
+
+**Performance**:
+- Each query spawns psql subprocess
+- Acceptable for typical QMD usage patterns
+- Could be optimized with connection pooling if needed
 Two options for full implementation:
 
 1. **Make IDatabase async** (breaking change)

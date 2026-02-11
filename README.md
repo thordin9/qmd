@@ -1,5 +1,7 @@
 # QMD - Query Markup Documents
 
+![Tests](https://github.com/thordin9/qmd/workflows/Tests/badge.svg)
+
 An on-device search engine for everything you need to remember. Index your markdown notes, meeting transcripts, documentation, and knowledge bases. Search with keywords or natural language. Ideal for your agentic flows.
 
 QMD combines BM25 full-text search, vector semantic search, and LLM re-ranking. By default it runs locally via node-llama-cpp with GGUF models, with optional OpenRouter- or Ollama-backed inference.
@@ -541,6 +543,10 @@ Index stored in: `~/.cache/qmd/index.sqlite`
 
 QMD supports PostgreSQL with pgvector extension as an alternative to SQLite for centralized deployments and team collaboration.
 
+**Requirements:**
+- PostgreSQL 12+ with pgvector extension
+- `psql` command-line client (included with PostgreSQL installations)
+
 **Setup:**
 
 1. Start PostgreSQL with pgvector:
@@ -569,6 +575,8 @@ qmd collection add ~/notes --name notes
 qmd embed
 qmd search "query"
 ```
+
+**Note:** QMD uses the `psql` command-line client for PostgreSQL operations, providing synchronous database access without requiring async refactoring. This is standard on all PostgreSQL installations.
 
 ### Schema
 
