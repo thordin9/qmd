@@ -1457,7 +1457,8 @@ async function collectionAddOSXNotes(name: string, account: string): Promise<voi
   }
 
   // Build the update command that will be run on qmd update
-  const updateCommand = `osascript -l JavaScript "${scriptPath}" "${osxNotesDir}" ${account}`;
+  // Use absolute path to osascript to avoid PATH lookup issues
+  const updateCommand = `/usr/bin/osascript -l JavaScript "${scriptPath}" "${osxNotesDir}" ${account}`;
 
   // Add collection to YAML config with update command
   const { addCollection } = await import("./collections.js");
