@@ -372,8 +372,8 @@ describe("CLI Update Command", () => {
 
   test("executes update command with environment variables", async () => {
     // Create an isolated test environment
-    const env = await createIsolatedTestEnv("update-cmd");
-    const { dbPath, configDir } = env;
+    const testEnv = await createIsolatedTestEnv("update-cmd");
+    const { dbPath, configDir } = testEnv;
     
     // Create a collection with an update command that uses environment variables
     // The update command should echo $PATH to verify env vars are available
