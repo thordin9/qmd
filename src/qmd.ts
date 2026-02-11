@@ -543,17 +543,33 @@ async function updateCollections(): Promise<void> {
             errorOutput = shellResult.stderr?.toString() || "";
             exitCode = shellResult.exitCode;
           } catch (shellError: any) {
-            // Both methods failed - provide helpful error with possible causes
-            let errorMsg = `Both direct execution and shell execution failed.\nDirect: ${spawnError.message}\nShell: ${shellError.message}\n\n`;
-            
-            // Check error code directly (more reliable than string matching)
-            if (spawnError.code === 'ENOENT' || spawnError.code === 'EACCES') {
-              errorMsg += `This may be a macOS permission issue. Try:\n1. Grant Terminal/Bun "Full Disk Access" in System Settings > Privacy & Security\n2. Restart Terminal/IDE after granting permissions`;
-            } else {
-              errorMsg += `Possible causes:\n1. Command syntax error in YAML config\n2. Missing or inaccessible binary\n3. macOS permission restrictions`;
+            // If Bun.$ also fails, try executing via /bin/sh wrapper
+            // This works around Bun entitlement restrictions where the shell can execute
+            // binaries that Bun cannot directly spawn (even though terminal can run them)
+            console.log(`${c.dim}    Attempting shell wrapper method...${c.reset}`);
+            try {
+              result = Bun.spawnSync(["/bin/sh", "-c", normalizedCommand], {
+                cwd: col.pwd,
+                env: process.env,
+                stdout: "pipe",
+                stderr: "pipe",
+              });
+              output = result.stdout?.toString() || "";
+              errorOutput = result.stderr?.toString() || "";
+              exitCode = result.exitCode;
+            } catch (shellWrapperError: any) {
+              // All three methods failed - provide helpful error
+              let errorMsg = `All execution methods failed.\nDirect: ${spawnError.message}\nBun.$: ${shellError.message}\nShell wrapper: ${shellWrapperError.message}\n\n`;
+              
+              // Check error code directly (more reliable than string matching)
+              if (spawnError.code === 'ENOENT' || spawnError.code === 'EACCES') {
+                errorMsg += `This may be a macOS permission issue. Try:\n1. Grant Terminal/Bun "Full Disk Access" in System Settings > Privacy & Security\n2. Restart Terminal/IDE after granting permissions`;
+              } else {
+                errorMsg += `Possible causes:\n1. Command syntax error in YAML config\n2. Missing or inaccessible binary\n3. macOS permission restrictions`;
+              }
+              
+              throw new Error(errorMsg);
             }
-            
-            throw new Error(errorMsg);
           }
         }
 
