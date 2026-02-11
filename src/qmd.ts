@@ -519,7 +519,7 @@ async function updateCollections(): Promise<void> {
         let result;
         let output = "";
         let errorOutput = "";
-        let exitCode: number | null = null;
+        let exitCode: number | null = null;  // null indicates execution failure
         
         // Try direct execution first
         try {
@@ -543,12 +543,22 @@ async function updateCollections(): Promise<void> {
             errorOutput = shellResult.stderr?.toString() || "";
             exitCode = shellResult.exitCode;
           } catch (shellError: any) {
-            // Both methods failed - provide helpful error
-            throw new Error(`Both direct execution and shell execution failed.\nDirect: ${spawnError.message}\nShell: ${shellError.message}\n\nThis may be a macOS permission issue. Try:\n1. Grant Terminal/Bun "Full Disk Access" in System Settings > Privacy & Security\n2. Restart Terminal/IDE after granting permissions\n3. If issue persists, verify osascript exists and is executable`);
+            // Both methods failed - provide helpful error with possible causes
+            let errorMsg = `Both direct execution and shell execution failed.\nDirect: ${spawnError.message}\nShell: ${shellError.message}\n\n`;
+            
+            // Check if it looks like a permission issue (ENOENT/EACCES on macOS)
+            if (spawnError.message.includes('ENOENT') || spawnError.message.includes('EACCES')) {
+              errorMsg += `This may be a macOS permission issue. Try:\n1. Grant Terminal/Bun "Full Disk Access" in System Settings > Privacy & Security\n2. Restart Terminal/IDE after granting permissions`;
+            } else {
+              errorMsg += `Possible causes:\n1. Command syntax error in YAML config\n2. Missing or inaccessible binary\n3. macOS permission restrictions`;
+            }
+            
+            throw new Error(errorMsg);
           }
         }
 
-        if (exitCode === null || exitCode === undefined) {
+        // Check if command actually executed (exitCode should be a number)
+        if (exitCode === null) {
           console.log(`${c.yellow}✗ Update command failed to execute${c.reset}`);
           if (errorOutput.trim()) {
             console.log(errorOutput.trim().split('\n').map(l => `    ${l}`).join('\n'));
