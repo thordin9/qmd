@@ -337,7 +337,25 @@ git clone https://github.com/tobi/qmd
 cd qmd
 bun install
 bun link
+
+# Run tests
+bun test
+
+# Run tests with mock LLM (no model downloads)
+QMD_MOCK_LLM=true bun test
+
+# Run specific test file
+bun test src/database.test.ts
+
+# Run with PostgreSQL tests enabled
+QMD_TEST_POSTGRES=true bun test
 ```
+
+**Testing with Mock LLM:**
+- Set `QMD_MOCK_LLM=true` to use deterministic mock responses
+- Skips model downloads for faster CI/development
+- Mock automatically enabled when `CI=true`
+- Real LLM used by default for local development
 
 ## Usage
 
@@ -604,6 +622,7 @@ llm_cache       -- Cached LLM responses (query expansion, rerank scores)
 | `QMD_POSTGRES_PASSWORD` | (empty) | PostgreSQL password (for `postgres` type) |
 | `QMD_POSTGRES_SSL` | `false` | Enable SSL for PostgreSQL connections |
 | `QMD_LLM_PROVIDER` | `local` | LLM provider: `local`, `openrouter`, or `ollama` |
+| `QMD_MOCK_LLM` | `false` | Use mock LLM for testing (no model downloads) |
 | `QMD_OPENROUTER_API_KEY` | - | OpenRouter API key (for `openrouter` provider) |
 | `QMD_OLLAMA_BASE_URL` | `http://localhost:11434` | Ollama endpoint (for `ollama` provider) |
 
