@@ -426,6 +426,9 @@ async function updateCollections(): Promise<void> {
 
         if (exitCode === null || exitCode === undefined) {
           console.log(`${c.yellow}✗ Update command failed to execute${c.reset}`);
+          if (errorOutput.trim()) {
+            console.log(errorOutput.trim().split('\n').map(l => `    ${l}`).join('\n'));
+          }
           process.exit(1);
         }
 
