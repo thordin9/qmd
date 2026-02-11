@@ -638,7 +638,7 @@ export class OpenRouterLLM implements LLM {
       return parseExpandedQueryLines(content, query, includeLexical);
     } catch (error) {
       // Query expansion is optional - use fallback on error
-      if (error instanceof Error && error.message.includes("aborted")) {
+      if (error && typeof error === 'object' && 'name' in error && error.name === 'AbortError') {
         process.stderr.write("Note: Query expansion timed out, using fallback (original query only)\n");
       } else {
         console.error("OpenRouter query expansion error:", error);
@@ -924,7 +924,7 @@ export class OllamaLLM implements LLM {
     } catch (error) {
       // Query expansion is optional - use fallback on error
       // Common causes: model loading timeout, network issues, model not available
-      if (error instanceof Error && error.message.includes("aborted")) {
+      if (error && typeof error === 'object' && 'name' in error && error.name === 'AbortError') {
         // Timeout - likely due to slow model loading or network
         process.stderr.write("Note: Query expansion timed out, using fallback (original query only)\n");
       } else {
