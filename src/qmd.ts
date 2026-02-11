@@ -561,7 +561,7 @@ async function updateCollections(): Promise<void> {
               exitCode = result.exitCode;
             } catch (shellWrapperError: any) {
               // All three methods failed - provide helpful error
-              let errorMsg = `All execution methods failed.\nDirect: ${spawnError.message}\nBun.$: ${shellError.message}\nShell wrapper: ${shellWrapperError.message}\n\n`;
+              let errorMsg = `All execution methods failed.\nDirect: ${spawnError.message}\nShell API: ${shellError.message}\nShell wrapper: ${shellWrapperError.message}\n\n`;
               
               // Check error code directly (more reliable than string matching)
               if (spawnError.code === 'ENOENT' || spawnError.code === 'EACCES') {
