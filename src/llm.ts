@@ -40,6 +40,18 @@ export function formatDocForEmbedding(text: string, title?: string): string {
 }
 
 // =============================================================================
+// Error Checking Utilities
+// =============================================================================
+
+/**
+ * Type guard to check if an error is an AbortError from AbortController.
+ * DOMException uses the name property to identify error types.
+ */
+function isAbortError(error: unknown): boolean {
+  return error !== null && typeof error === 'object' && 'name' in error && error.name === 'AbortError';
+}
+
+// =============================================================================
 // Types
 // =============================================================================
 
@@ -486,10 +498,11 @@ export class OpenRouterLLM implements LLM {
     this.requestTimeoutMs = config.requestTimeoutMs ?? 60_000;
   }
 
-  private async postJson<T>(path: string, payload: unknown): Promise<T> {
+  private async postJson<T>(path: string, payload: unknown, timeoutMs?: number): Promise<T> {
     const url = `${this.baseUrl}${path}`;
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), this.requestTimeoutMs);
+    const effectiveTimeout = timeoutMs ?? this.requestTimeoutMs;
+    const timeout = setTimeout(() => controller.abort(), effectiveTimeout);
 
     try {
       const response = await fetch(url, {
@@ -625,17 +638,23 @@ export class OpenRouterLLM implements LLM {
     ].filter(Boolean).join("\n");
 
     try {
+      // Use a longer timeout for query expansion (3 minutes) since we have a fallback
       const response = await this.postJson<OpenRouterChatResponse>("/chat/completions", {
         model: this.generateModelUri,
         temperature: 0.2,
         max_tokens: 300,
         messages: [{ role: "user", content: prompt }],
-      });
+      }, 180_000);
 
       const content = OpenRouterLLM.contentToString(response.choices?.[0]?.message?.content);
       return parseExpandedQueryLines(content, query, includeLexical);
     } catch (error) {
-      console.error("OpenRouter query expansion error:", error);
+      // Query expansion is optional - use fallback on error
+      if (isAbortError(error)) {
+        console.warn("Note: Query expansion timed out, using fallback (original query only)");
+      } else {
+        console.error("OpenRouter query expansion error:", error);
+      }
       const fallback: Queryable[] = [{ type: "vec", text: query }];
       if (includeLexical) fallback.unshift({ type: "lex", text: query });
       return fallback;
@@ -766,10 +785,11 @@ export class OllamaLLM implements LLM {
     this.requestTimeoutMs = config.requestTimeoutMs ?? 60_000;
   }
 
-  private async postJson<T>(path: string, payload: unknown): Promise<T> {
+  private async postJson<T>(path: string, payload: unknown, timeoutMs?: number): Promise<T> {
     const url = `${this.baseUrl}${path}`;
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), this.requestTimeoutMs);
+    const effectiveTimeout = timeoutMs ?? this.requestTimeoutMs;
+    const timeout = setTimeout(() => controller.abort(), effectiveTimeout);
 
     try {
       const headers: Record<string, string> = {
@@ -899,6 +919,8 @@ export class OllamaLLM implements LLM {
     ].filter(Boolean).join("\n");
 
     try {
+      // Use a longer timeout for query expansion (3 minutes) since we have a fallback
+      // and models may need time to load on first request
       const response = await this.postJson<OllamaGenerateResponse>("/api/generate", {
         model: this.generateModelUri,
         prompt,
@@ -907,12 +929,20 @@ export class OllamaLLM implements LLM {
           temperature: 0.2,
           num_predict: 300,
         },
-      });
+      }, 180_000);
 
       const content = response.response || "";
       return parseExpandedQueryLines(content, query, includeLexical);
     } catch (error) {
-      console.error("Ollama query expansion error:", error);
+      // Query expansion is optional - use fallback on error
+      // Common causes: model loading timeout, network issues, model not available
+      if (isAbortError(error)) {
+        // Timeout - likely due to slow model loading or network
+        console.warn("Note: Query expansion timed out, using fallback (original query only)");
+      } else {
+        // Other error - log it for debugging
+        console.error("Ollama query expansion error:", error);
+      }
       const fallback: Queryable[] = [{ type: "vec", text: query }];
       if (includeLexical) fallback.unshift({ type: "lex", text: query });
       return fallback;
