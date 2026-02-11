@@ -49,10 +49,10 @@ describe("Database Abstraction Layer", () => {
       expect(typeof db.close).toBe('function');
     });
 
-    test("createDatabase throws on unsupported type", () => {
+    test("createDatabase requires config for postgres", () => {
       expect(() => {
         createDatabase('postgres' as DatabaseType, { path: testDbPath });
-      }).toThrow("Unsupported database type");
+      }).toThrow("PostgreSQL requires 'config' in options");
     });
   });
 
