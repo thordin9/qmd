@@ -9,6 +9,8 @@ texts/
 !README.md
 !CLAUDE.md
 !ARCHITECTURE.md
+!POSTGRES_TESTING.md
+!POSTGRES_IMPLEMENTATION.md
 !skills/**/*.md
 !finetune/*.md
 finetune/outputs/
