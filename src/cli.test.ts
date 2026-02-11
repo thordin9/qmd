@@ -372,17 +372,16 @@ describe("CLI Update Command", () => {
 
   test("executes update command with environment variables", async () => {
     // Create an isolated test environment
-    const testEnv = await createIsolatedTestEnv("update-cmd");
-    const { dbPath, configDir } = testEnv;
+    const { dbPath, configDir } = await createIsolatedTestEnv("update-cmd");
     
     // Create a collection with an update command that uses environment variables
-    // The update command should echo $PATH to verify env vars are available
-    const collectionDir = join(testDir, "update-test");
+    const collectionName = "update-test";
+    const collectionDir = join(testDir, collectionName);
     await mkdir(collectionDir, { recursive: true });
     await writeFile(join(collectionDir, "test.md"), "# Test\n");
     
     // Add collection first
-    await runQmd(["collection", "add", collectionDir, "--name", "update-test"], 
+    await runQmd(["collection", "add", collectionDir, "--name", collectionName], 
                  { dbPath, configDir });
     
     // Manually add an update command to the YAML config
@@ -392,7 +391,10 @@ describe("CLI Update Command", () => {
     
     // Add an update command that verifies environment variables are available
     // Using 'test -n "$PATH"' to verify PATH is set, then echo success message
-    config.collections["update-test"].update = "test -n \"$PATH\" && echo 'Update successful'";
+    if (!config.collections[collectionName]) {
+      throw new Error(`Collection ${collectionName} not found in config`);
+    }
+    config.collections[collectionName].update = "test -n \"$PATH\" && echo 'Update successful'";
     await writeFile(configPath, YAML.stringify(config));
     
     // Run update - should succeed with the update command
