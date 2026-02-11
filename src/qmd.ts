@@ -411,6 +411,10 @@ function parseShellCommand(command: string): string[] {
           i += 2;
           continue;
         }
+        // Not an escape sequence in quotes, keep the backslash
+        current += char;
+        i++;
+        continue;
       } else {
         // Outside quotes, escape any character
         current += nextChar;
@@ -457,7 +461,7 @@ function parseShellCommand(command: string): string[] {
 
   // Warn about unclosed quotes (but still return the parsed args)
   if (inQuotes) {
-    console.error(`${c.yellow}Warning: Unclosed quote (${currentQuoteChar}) in command${c.reset}`);
+    console.error(`${c.yellow}Warning: Unclosed quote (${currentQuoteChar}) in command: ${command}${c.reset}`);
   }
 
   return args;
@@ -493,6 +497,9 @@ async function updateCollections(): Promise<void> {
       try {
         // Parse command to execute directly without shell
         // This avoids posix_spawn issues with shells on some macOS systems
+        // Note: This does not support shell features like pipes (|), redirects (>),
+        // environment variable expansion ($VAR), or command substitution ($(cmd))
+        // The OSX Notes update command is a simple osascript invocation which works fine
         const cmdParts = parseShellCommand(yamlCol.update);
         
         const result = Bun.spawnSync(cmdParts, {
