@@ -385,6 +385,64 @@ function showStatus(): void {
   closeDb();
 }
 
+/**
+ * Parse a simple shell command into an array of arguments for direct execution.
+ * Handles quoted strings and escapes. For simple commands like:
+ *   osascript -l JavaScript "file.js" "arg with spaces" arg
+ * Returns: ["osascript", "-l", "JavaScript", "file.js", "arg with spaces", "arg"]
+ */
+function parseShellCommand(command: string): string[] {
+  const args: string[] = [];
+  let current = "";
+  let inQuotes = false;
+  let quoteChar = "";
+  let escaped = false;
+
+  for (let i = 0; i < command.length; i++) {
+    const char = command[i];
+
+    if (escaped) {
+      current += char;
+      escaped = false;
+      continue;
+    }
+
+    if (char === "\\") {
+      escaped = true;
+      continue;
+    }
+
+    if (char === '"' || char === "'") {
+      if (!inQuotes) {
+        inQuotes = true;
+        quoteChar = char;
+      } else if (char === quoteChar) {
+        inQuotes = false;
+        quoteChar = "";
+      } else {
+        current += char;
+      }
+      continue;
+    }
+
+    if (char === " " && !inQuotes) {
+      if (current) {
+        args.push(current);
+        current = "";
+      }
+      continue;
+    }
+
+    current += char;
+  }
+
+  if (current) {
+    args.push(current);
+  }
+
+  return args;
+}
+
 async function updateCollections(): Promise<void> {
   const db = getDb();
   // Collections are defined in YAML; no duplicate cleanup needed.
@@ -413,7 +471,11 @@ async function updateCollections(): Promise<void> {
     if (yamlCol?.update) {
       console.log(`${c.dim}    Running update command: ${yamlCol.update}${c.reset}`);
       try {
-        const result = Bun.spawnSync(["/bin/sh", "-c", yamlCol.update], {
+        // Parse command to execute directly without shell
+        // This avoids posix_spawn issues with shells on some macOS systems
+        const cmdParts = parseShellCommand(yamlCol.update);
+        
+        const result = Bun.spawnSync(cmdParts, {
           cwd: col.pwd,
           env: process.env,
           stdout: "pipe",
