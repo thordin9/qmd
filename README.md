@@ -533,7 +533,42 @@ qmd cleanup
 
 ## Data Storage
 
+### SQLite (Default)
+
 Index stored in: `~/.cache/qmd/index.sqlite`
+
+### PostgreSQL (Optional)
+
+QMD supports PostgreSQL with pgvector extension as an alternative to SQLite for centralized deployments and team collaboration.
+
+**Setup:**
+
+1. Start PostgreSQL with pgvector:
+```sh
+# Using Docker
+docker-compose up -d
+
+# Or use existing PostgreSQL and install pgvector extension
+psql -d your_db -c "CREATE EXTENSION vector"
+```
+
+2. Configure environment variables:
+```sh
+export QMD_DB_TYPE=postgres
+export QMD_POSTGRES_HOST=localhost
+export QMD_POSTGRES_PORT=5432
+export QMD_POSTGRES_DB=qmd
+export QMD_POSTGRES_USER=qmd_user
+export QMD_POSTGRES_PASSWORD=qmd_password
+export QMD_POSTGRES_SSL=false  # Set to 'true' for SSL connections
+```
+
+3. Use QMD normally - it will automatically use PostgreSQL:
+```sh
+qmd collection add ~/notes --name notes
+qmd embed
+qmd search "query"
+```
 
 ### Schema
 
@@ -541,9 +576,9 @@ Index stored in: `~/.cache/qmd/index.sqlite`
 collections     -- Indexed directories with name and glob patterns
 path_contexts   -- Context descriptions by virtual path (qmd://...)
 documents       -- Markdown content with metadata and docid (6-char hash)
-documents_fts   -- FTS5 full-text index
+documents_fts   -- FTS5 full-text index (SQLite) or GIN index (PostgreSQL)
 content_vectors -- Embedding chunks (hash, seq, pos, 800 tokens each)
-vectors_vec     -- sqlite-vec vector index (hash_seq key)
+vectors_vec     -- sqlite-vec (SQLite) or pgvector (PostgreSQL) vector index
 llm_cache       -- Cached LLM responses (query expansion, rerank scores)
 ```
 
@@ -552,6 +587,17 @@ llm_cache       -- Cached LLM responses (query expansion, rerank scores)
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `XDG_CACHE_HOME` | `~/.cache` | Cache directory location |
+| `QMD_DB_TYPE` | `sqlite` | Database type: `sqlite` or `postgres` |
+| `QMD_DB_PATH` | (auto) | SQLite database path (for `sqlite` type) |
+| `QMD_POSTGRES_HOST` | `localhost` | PostgreSQL host (for `postgres` type) |
+| `QMD_POSTGRES_PORT` | `5432` | PostgreSQL port (for `postgres` type) |
+| `QMD_POSTGRES_DB` | `qmd` | PostgreSQL database name (for `postgres` type) |
+| `QMD_POSTGRES_USER` | `postgres` | PostgreSQL username (for `postgres` type) |
+| `QMD_POSTGRES_PASSWORD` | (empty) | PostgreSQL password (for `postgres` type) |
+| `QMD_POSTGRES_SSL` | `false` | Enable SSL for PostgreSQL connections |
+| `QMD_LLM_PROVIDER` | `local` | LLM provider: `local`, `openrouter`, or `ollama` |
+| `QMD_OPENROUTER_API_KEY` | - | OpenRouter API key (for `openrouter` provider) |
+| `QMD_OLLAMA_BASE_URL` | `http://localhost:11434` | Ollama endpoint (for `ollama` provider) |
 
 ## How It Works
 

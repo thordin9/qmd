@@ -68,6 +68,7 @@
 
 import { Database } from "bun:sqlite";
 import { statSync } from "node:fs";
+import type { Pool, PoolClient, QueryResult as PgQueryResult } from "pg";
 
 // =============================================================================
 // SQLite Configuration
@@ -204,12 +205,27 @@ export interface DatabaseOptions {
   /**
    * Path to the database file (for file-based databases like SQLite)
    */
-  path: string;
+  path?: string;
   
   /**
    * Additional configuration options specific to the database implementation
    */
   config?: Record<string, unknown>;
+}
+
+/**
+ * PostgreSQL connection configuration
+ */
+export interface PostgresConfig {
+  host: string;
+  port: number;
+  database: string;
+  user: string;
+  password: string;
+  ssl?: boolean | { rejectUnauthorized: boolean };
+  max?: number; // maximum number of connections in pool
+  idleTimeoutMillis?: number;
+  connectionTimeoutMillis?: number;
 }
 
 // =============================================================================
@@ -275,25 +291,127 @@ export class SQLiteDatabase implements IDatabase {
 }
 
 // =============================================================================
+// PostgreSQL Implementation
+// =============================================================================
+
+/**
+ * PostgreSQL-specific statement wrapper
+ * Note: Uses synchronous wrappers around async operations via Bun's await functionality
+ */
+class PostgresStatement implements IStatement {
+  constructor(
+    private pool: Pool,
+    private sql: string
+  ) {}
+  
+  get(...params: DatabaseValue[]): QueryResult {
+    // Use top-level await in Bun for synchronous interface
+    const client = await this.pool.connect();
+    try {
+      const result = await client.query(this.sql, params);
+      return result.rows[0] || null;
+    } finally {
+      client.release();
+    }
+  }
+  
+  all(...params: DatabaseValue[]): QueryResults {
+    const client = await this.pool.connect();
+    try {
+      const result = await client.query(this.sql, params);
+      return result.rows;
+    } finally {
+      client.release();
+    }
+  }
+  
+  run(...params: DatabaseValue[]): MutationResult {
+    const client = await this.pool.connect();
+    try {
+      const result = await client.query(this.sql, params);
+      return {
+        changes: result.rowCount || 0,
+        lastInsertRowid: 0, // PostgreSQL doesn't have lastInsertRowid by default
+      };
+    } finally {
+      client.release();
+    }
+  }
+  
+  finalize(): void {
+    // PostgreSQL doesn't require explicit statement finalization
+    // Connections are managed by the pool
+  }
+}
+
+/**
+ * PostgreSQL database implementation using pg driver
+ * Note: This implementation uses top-level await in Bun to provide a synchronous interface
+ * over async PostgreSQL operations.
+ */
+export class PostgresDatabase implements IDatabase {
+  private pool: Pool;
+  
+  constructor(config: PostgresConfig) {
+    // Lazy import to avoid dependency when using SQLite
+    const { Pool: PgPool } = require("pg") as typeof import("pg");
+    this.pool = new PgPool(config);
+  }
+  
+  prepare(sql: string): IStatement {
+    return new PostgresStatement(this.pool, sql);
+  }
+  
+  exec(sql: string): void {
+    const client = await this.pool.connect();
+    try {
+      await client.query(sql);
+    } finally {
+      client.release();
+    }
+  }
+  
+  close(): void {
+    await this.pool.end();
+  }
+  
+  getNativeDatabase(): Pool {
+    return this.pool;
+  }
+  
+  supportsExtensions(): boolean {
+    return false; // pgvector is installed as a PostgreSQL extension, not loaded dynamically
+  }
+}
+
+// =============================================================================
 // Factory Functions
 // =============================================================================
 
 /**
  * Database type identifier
  */
-export type DatabaseType = 'sqlite';
+export type DatabaseType = 'sqlite' | 'postgres';
 
 /**
  * Create a database instance
  * 
- * @param type - Database type ('sqlite' is currently the only supported type)
+ * @param type - Database type ('sqlite' or 'postgres')
  * @param options - Database configuration options
  * @returns Database instance implementing IDatabase interface
  */
 export function createDatabase(type: DatabaseType, options: DatabaseOptions): IDatabase {
   switch (type) {
     case 'sqlite':
+      if (!options.path) {
+        throw new Error("SQLite requires 'path' in options");
+      }
       return new SQLiteDatabase(options.path);
+    case 'postgres':
+      if (!options.config) {
+        throw new Error("PostgreSQL requires 'config' in options");
+      }
+      return new PostgresDatabase(options.config as PostgresConfig);
     default:
       throw new Error(`Unsupported database type: ${type}`);
   }
@@ -307,4 +425,55 @@ export function createDatabase(type: DatabaseType, options: DatabaseOptions): ID
  */
 export function createSQLiteDatabase(path: string): IDatabase {
   return new SQLiteDatabase(path);
+}
+
+/**
+ * Create a PostgreSQL database (convenience function)
+ * 
+ * @param config - PostgreSQL connection configuration
+ * @returns PostgreSQL database instance
+ */
+export function createPostgresDatabase(config: PostgresConfig): IDatabase {
+  return new PostgresDatabase(config);
+}
+
+/**
+ * Create a database from environment variables
+ * 
+ * Supports:
+ * - QMD_DB_TYPE: 'sqlite' (default) or 'postgres'
+ * - For SQLite: QMD_DB_PATH or INDEX_PATH
+ * - For PostgreSQL: QMD_POSTGRES_HOST, QMD_POSTGRES_PORT, QMD_POSTGRES_DB,
+ *   QMD_POSTGRES_USER, QMD_POSTGRES_PASSWORD, QMD_POSTGRES_SSL
+ */
+export function createDatabaseFromEnv(defaultPath?: string): IDatabase {
+  const dbType = (Bun.env.QMD_DB_TYPE || 'sqlite') as DatabaseType;
+  
+  if (dbType === 'postgres') {
+    const host = Bun.env.QMD_POSTGRES_HOST || 'localhost';
+    const port = parseInt(Bun.env.QMD_POSTGRES_PORT || '5432', 10);
+    const database = Bun.env.QMD_POSTGRES_DB || 'qmd';
+    const user = Bun.env.QMD_POSTGRES_USER || 'postgres';
+    const password = Bun.env.QMD_POSTGRES_PASSWORD || '';
+    const ssl = Bun.env.QMD_POSTGRES_SSL === 'true';
+    
+    return createPostgresDatabase({
+      host,
+      port,
+      database,
+      user,
+      password,
+      ssl,
+      max: 10,
+      idleTimeoutMillis: 30000,
+      connectionTimeoutMillis: 2000,
+    });
+  }
+  
+  // Default to SQLite
+  const path = Bun.env.QMD_DB_PATH || defaultPath;
+  if (!path) {
+    throw new Error("SQLite requires QMD_DB_PATH or default path");
+  }
+  return createSQLiteDatabase(path);
 }
