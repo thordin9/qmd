@@ -916,7 +916,7 @@ describe("FTS Search", () => {
 
   // BM25 IDF requires corpus depth — helper adds non-matching docs so term frequency
   // differentiation produces meaningful scores (2-doc corpus has near-zero IDF).
-  async function addNoiseDocuments(db: Database, collectionName: string, count = 8) {
+  async function addNoiseDocuments(db: IDatabase, collectionName: string, count = 8) {
     for (let i = 0; i < count; i++) {
       await insertTestDocument(db, collectionName, {
         name: `noise${i}`,

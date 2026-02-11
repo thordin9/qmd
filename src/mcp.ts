@@ -621,7 +621,7 @@ export async function startMcpHttpServer(port: number, options?: { quiet?: boole
     },
   });
 
-  const actualPort = httpServer.port;
+  const actualPort: number = httpServer.port ?? port;
 
   let stopping = false;
   const stop = async () => {

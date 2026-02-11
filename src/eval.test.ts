@@ -14,7 +14,7 @@ import { describe, test, expect, beforeAll, afterAll } from "bun:test";
 import { mkdtempSync, rmSync, readFileSync, readdirSync } from "fs";
 import { join } from "path";
 import { tmpdir } from "os";
-import Database from "bun:sqlite";
+import type { IDatabase } from "./database";
 
 // Set INDEX_PATH before importing store to prevent using global index
 const tempDir = mkdtempSync(join(tmpdir(), "qmd-eval-"));
@@ -99,7 +99,7 @@ function calcHitRate(
 
 describe("BM25 Search (FTS)", () => {
   let store: ReturnType<typeof createStore>;
-  let db: Database;
+  let db: IDatabase;
 
   beforeAll(() => {
     store = createStore();
@@ -154,7 +154,7 @@ describe("BM25 Search (FTS)", () => {
 
 describe("Vector Search", () => {
   let store: ReturnType<typeof createStore>;
-  let db: Database;
+  let db: IDatabase;
   let hasEmbeddings = false;
 
   beforeAll(async () => {
@@ -266,7 +266,7 @@ describe("Vector Search", () => {
 
 describe("Hybrid Search (RRF)", () => {
   let store: ReturnType<typeof createStore>;
-  let db: Database;
+  let db: IDatabase;
   let hasVectors = false;
 
   beforeAll(() => {
