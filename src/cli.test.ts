@@ -754,6 +754,26 @@ describe("CLI Collection Commands", () => {
     expect(exitCode2).toBe(1);
     expect(stderr2).toContain("Usage:");
   });
+
+  test("add-osx-notes requires --name parameter", async () => {
+    const { stderr, exitCode } = await runQmd(["collection", "add-osx-notes"], { dbPath: localDbPath });
+    expect(exitCode).toBe(1);
+    expect(stderr).toContain("Usage:");
+    expect(stderr).toContain("--name <name>");
+  });
+
+  test("add-osx-notes validates collection name", async () => {
+    const { stderr, exitCode } = await runQmd(["collection", "add-osx-notes", "--name", "invalid name!"], { dbPath: localDbPath });
+    expect(exitCode).toBe(1);
+    expect(stderr).toContain("Invalid collection name");
+  });
+
+  test("add-osx-notes prevents duplicate collection names", async () => {
+    // Try to create an OSX Notes collection with the same name as existing collection
+    const { stderr, exitCode } = await runQmd(["collection", "add-osx-notes", "--name", "fixtures"], { dbPath: localDbPath });
+    expect(exitCode).toBe(1);
+    expect(stderr).toContain("Collection 'fixtures' already exists");
+  });
 });
 
 // =============================================================================
