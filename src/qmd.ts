@@ -1322,6 +1322,63 @@ async function collectionAdd(pwd: string, globPattern: string, name?: string): P
   console.log(`${c.green}✓${c.reset} Collection '${collName}' created successfully`);
 }
 
+async function collectionAddOSXNotes(name: string, account: string): Promise<void> {
+  // Validate collection name
+  const { isValidCollectionName } = await import("./collections.js");
+  if (!isValidCollectionName(name)) {
+    console.error(`${c.yellow}Invalid collection name: ${name}${c.reset}`);
+    console.error(`Collection names must contain only alphanumeric characters, hyphens, and underscores.`);
+    process.exit(1);
+  }
+
+  // Check if collection with this name already exists
+  const existing = getCollectionFromYaml(name);
+  if (existing) {
+    console.error(`${c.yellow}Collection '${name}' already exists.${c.reset}`);
+    console.error(`Use a different name with --name <name> or remove it first with 'qmd collection remove ${name}'`);
+    process.exit(1);
+  }
+
+  // Create temporary directory for OSX notes export
+  const cacheDir = Bun.env.XDG_CACHE_HOME || `${homedir()}/.cache`;
+  const osxNotesDir = `${cacheDir}/qmd/osx-notes/${name}`;
+
+  // Get the path to the export script
+  const scriptPath = `${import.meta.dir}/../scripts/export-osx-notes.js`;
+
+  if (!existsSync(scriptPath)) {
+    console.error(`${c.red}Export script not found: ${scriptPath}${c.reset}`);
+    console.error(`Please ensure the export-osx-notes.js script is installed.`);
+    process.exit(1);
+  }
+
+  // Build the update command that will be run on qmd update
+  const updateCommand = `osascript -l JavaScript "${scriptPath}" "${osxNotesDir}" ${account}`;
+
+  // Add collection to YAML config with update command
+  const { addCollection } = await import("./collections.js");
+  addCollection(name, osxNotesDir, "**/*.md");
+
+  // Now add the update command to the collection
+  const { loadConfig, saveConfig } = await import("./collections.js");
+  const config = loadConfig();
+  if (config.collections[name]) {
+    config.collections[name].update = updateCommand;
+
+    // Add context to indicate this is from OSX Notes
+    config.collections[name].context = {
+      "/": `OSX Notes exported from ${account === 'all' ? 'all accounts' : `account: ${account}`}. Source: macOS Notes.app`
+    };
+
+    saveConfig(config);
+  }
+
+  console.log(`${c.green}✓${c.reset} Collection '${name}' configured for OSX Notes`);
+  console.log(`  Account filter: ${account}`);
+  console.log(`  Export directory: ${osxNotesDir}`);
+  console.log(`\nRun ${c.cyan}qmd update${c.reset} to export and index notes from OSX Notes.app`);
+}
+
 function collectionRemove(name: string): void {
   // Check if collection exists in YAML
   const coll = getCollectionFromYaml(name);
@@ -2109,6 +2166,7 @@ function parseCLI() {
       // Collection options
       name: { type: "string" },  // collection name
       mask: { type: "string" },  // glob pattern
+      account: { type: "string" },  // OSX Notes account filter
       // Embed options
       force: { type: "boolean", short: "f" },
       // Update options
@@ -2170,6 +2228,7 @@ function parseCLI() {
 function showHelp(): void {
   console.log("Usage:");
   console.log("  qmd collection add [path] --name <name> --mask <pattern>  - Create/index collection");
+  console.log("  qmd collection add-osx-notes --name <name> [--account <account|all>]  - Create collection from OSX Notes");
   console.log("  qmd collection list           - List all collections with details");
   console.log("  qmd collection remove <name>  - Remove a collection by name");
   console.log("  qmd collection rename <old> <new>  - Rename a collection");
@@ -2382,9 +2441,31 @@ if (import.meta.main) {
           break;
         }
 
+        case "add-osx-notes": {
+          const name = cli.values.name as string | undefined;
+          const account = (cli.values.account as string) || 'all';
+
+          if (!name) {
+            console.error("Usage: qmd collection add-osx-notes --name <name> [--account <account|all>]");
+            console.error("");
+            console.error("Options:");
+            console.error("  --name <name>        - Collection name (required)");
+            console.error("  --account <account>  - Filter to specific account (default: all)");
+            console.error("");
+            console.error("Examples:");
+            console.error("  qmd collection add-osx-notes --name osxnotes");
+            console.error("  qmd collection add-osx-notes --name osxnotes --account iCloud");
+            console.error("  qmd collection add-osx-notes --name osxnotes --account all");
+            process.exit(1);
+          }
+
+          await collectionAddOSXNotes(name, account);
+          break;
+        }
+
         default:
           console.error(`Unknown subcommand: ${subcommand}`);
-          console.error("Available: list, add, remove, rename");
+          console.error("Available: list, add, remove, rename, add-osx-notes");
           process.exit(1);
       }
       break;
