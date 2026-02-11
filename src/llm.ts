@@ -706,16 +706,6 @@ type OllamaGenerateResponse = {
   done_reason?: string;
 };
 
-type OllamaChatResponse = {
-  model?: string;
-  created_at?: string;
-  message?: {
-    role?: string;
-    content?: string;
-  };
-  done?: boolean;
-};
-
 export type OllamaConfig = {
   apiKey?: string;
   apiKeyFile?: string;
@@ -735,10 +725,24 @@ function loadOllamaApiKey(config: OllamaConfig): string | null {
   if (config.apiKey) return config.apiKey;
 
   // Try key file
-  const keyFile = config.apiKeyFile || process.env.QMD_OLLAMA_API_KEY_FILE || DEFAULT_OLLAMA_API_KEY_FILE;
+  const keyFileEnv = process.env.QMD_OLLAMA_API_KEY_FILE;
+  const keyFile = config.apiKeyFile || keyFileEnv || DEFAULT_OLLAMA_API_KEY_FILE;
   if (existsSync(keyFile)) {
     const key = readFileSync(keyFile, "utf-8").trim();
     if (key) return key;
+
+    // If the user explicitly configured an API key file (via config or env)
+    // and that file is empty, surface an explicit error instead of silently
+    // treating it as "no key". This helps avoid confusing auth failures.
+    const isExplicitFile =
+      (config.apiKeyFile && keyFile === config.apiKeyFile) ||
+      (keyFileEnv && keyFile === keyFileEnv);
+    if (isExplicitFile) {
+      throw new Error(
+        `Ollama API key file "${keyFile}" is empty. ` +
+          `Please add an API key to this file or unset the apiKeyFile/QMD_OLLAMA_API_KEY_FILE setting.`
+      );
+    }
   }
 
   // No API key found - this is okay for local Ollama
@@ -926,20 +930,26 @@ export class OllamaLLM implements LLM {
 
     try {
       const model = options.model || this.rerankModelUri;
-      const queryVectors = await this.requestEmbeddings(query, model);
-      const queryEmbedding = queryVectors[0];
+      
+      // Batch query and document texts into a single embeddings request
+      const docTexts = documents.map((d) => d.text);
+      const allTexts = [query, ...docTexts];
+      const allEmbeddings = await this.requestEmbeddings(allTexts, model);
+
+      const queryEmbedding = allEmbeddings[0];
       if (!queryEmbedding || queryEmbedding.length === 0) {
         throw new Error("Ollama rerank: failed to get query embedding");
       }
 
-      const docTexts = documents.map((d) => d.text);
-      const docEmbeddings = await this.requestEmbeddings(docTexts, model);
+      const docEmbeddings = allEmbeddings.slice(1);
 
       const scored = documents.map((doc, i) => {
         const docEmbed = docEmbeddings[i];
-        const score = docEmbed && docEmbed.length > 0
+        const rawScore = docEmbed && docEmbed.length > 0
           ? cosineSimilarity(queryEmbedding, docEmbed)
-          : 0;
+          : -1;
+        // Normalize cosine [-1,1] -> [0,1] for consistency with rerank pipeline
+        const score = (rawScore + 1) / 2;
         return { file: doc.file, index: i, score };
       });
 

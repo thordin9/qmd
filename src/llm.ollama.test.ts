@@ -55,7 +55,8 @@ describe("Ollama provider", () => {
     const writes: string[] = [];
     stderrAny.write = (chunk: any) => {
       writes.push(String(chunk));
-      return originalWrite.call(process.stderr, chunk);
+      // Swallow the write to avoid emitting to real stderr during tests
+      return true;
     };
 
     try {
@@ -310,7 +311,7 @@ describe("Ollama provider", () => {
     llm.embed("test");
   });
 
-  test("uses default base URL when not specified", () => {
+  test("uses default base URL when not specified", async () => {
     const llm = new OllamaLLM();
     
     globalThis.fetch = async (url: string | URL | Request): Promise<Response> => {
@@ -318,6 +319,25 @@ describe("Ollama provider", () => {
       return jsonResponse({ embeddings: [[0.5]] });
     };
 
-    llm.embed("test");
+    await llm.embed("test");
+  });
+
+  test("throws error when explicitly configured API key file is empty", async () => {
+    const { mkdtemp, rm, writeFile } = await import("node:fs/promises");
+    const { tmpdir } = await import("node:os");
+    const { join } = await import("node:path");
+
+    const tempDir = await mkdtemp(join(tmpdir(), "qmd-test-"));
+    const emptyKeyFile = join(tempDir, "empty.key");
+    await writeFile(emptyKeyFile, "", "utf-8");
+
+    try {
+      // Explicitly setting QMD_OLLAMA_API_KEY_FILE should error on empty file
+      process.env.QMD_OLLAMA_API_KEY_FILE = emptyKeyFile;
+      expect(() => new OllamaLLM()).toThrow(/is empty/);
+    } finally {
+      delete process.env.QMD_OLLAMA_API_KEY_FILE;
+      await rm(tempDir, { recursive: true });
+    }
   });
 });
