@@ -516,16 +516,36 @@ async function updateCollections(): Promise<void> {
           process.exit(1);
         }
         
-        const result = Bun.spawnSync(cmdParts, {
-          cwd: col.pwd,
-          env: process.env,
-          stdout: "pipe",
-          stderr: "pipe",
-        });
-
-        const output = result.stdout?.toString() || "";
-        const errorOutput = result.stderr?.toString() || "";
-        const exitCode = result.exitCode;
+        let result;
+        let output = "";
+        let errorOutput = "";
+        let exitCode: number | null = null;
+        
+        // Try direct execution first
+        try {
+          result = Bun.spawnSync(cmdParts, {
+            cwd: col.pwd,
+            env: process.env,
+            stdout: "pipe",
+            stderr: "pipe",
+          });
+          output = result.stdout?.toString() || "";
+          errorOutput = result.stderr?.toString() || "";
+          exitCode = result.exitCode;
+        } catch (spawnError: any) {
+          // If spawnSync fails (often permission/entitlement issues on macOS),
+          // try using Bun's $ shell API which may have different permissions
+          console.log(`${c.dim}    Retrying with shell...${c.reset}`);
+          try {
+            const shellResult = await $`${normalizedCommand}`.cwd(col.pwd).env(process.env).quiet();
+            output = shellResult.stdout?.toString() || "";
+            errorOutput = shellResult.stderr?.toString() || "";
+            exitCode = shellResult.exitCode;
+          } catch (shellError: any) {
+            // Both methods failed - provide helpful error
+            throw new Error(`Both direct execution and shell execution failed.\nDirect: ${spawnError.message}\nShell: ${shellError.message}\n\nThis may be a macOS permission issue. Try:\n1. Grant Terminal/Bun Full Disk Access in System Preferences\n2. Check if osascript has proper permissions: ls -la /usr/bin/osascript`);
+          }
+        }
 
         if (exitCode === null || exitCode === undefined) {
           console.log(`${c.yellow}✗ Update command failed to execute${c.reset}`);
