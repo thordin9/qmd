@@ -3,8 +3,8 @@
  *
  * Run with: bun test src/llm.test.ts
  *
- * These tests require the actual models to be downloaded. Run the embed or
- * rerank functions first to trigger model downloads.
+ * These tests require the actual models to be downloaded. They are skipped
+ * when QMD_MOCK_LLM=true or CI=true to avoid model downloads in CI.
  */
 
 import { describe, test, expect, beforeAll, afterAll } from "bun:test";
@@ -19,11 +19,15 @@ import {
   type ILLMSession,
 } from "./llm.js";
 
+// Skip LlamaCpp tests when mock mode is enabled
+const isMockMode = Bun.env.QMD_MOCK_LLM === "true" || Bun.env.CI === "true";
+const describeIfReal = isMockMode ? describe.skip : describe;
+
 // =============================================================================
 // Singleton Tests (no model loading required)
 // =============================================================================
 
-describe("Default LlamaCpp Singleton", () => {
+describeIfReal("Default LlamaCpp Singleton", () => {
   // Test singleton behavior without resetting to avoid orphan instances
   test("getDefaultLlamaCpp returns same instance on subsequent calls", () => {
     const llm1 = getDefaultLlamaCpp();
@@ -37,7 +41,7 @@ describe("Default LlamaCpp Singleton", () => {
 // Model Existence Tests
 // =============================================================================
 
-describe("LlamaCpp.modelExists", () => {
+describeIfReal("LlamaCpp.modelExists", () => {
   test("returns exists:true for HuggingFace model URIs", async () => {
     const llm = getDefaultLlamaCpp();
     const result = await llm.modelExists("hf:org/repo/model.gguf");
@@ -59,7 +63,7 @@ describe("LlamaCpp.modelExists", () => {
 // Integration Tests (require actual models)
 // =============================================================================
 
-describe("LlamaCpp Integration", () => {
+describeIfReal("LlamaCpp Integration", () => {
   // Use the singleton to avoid multiple Metal contexts
   const llm = getDefaultLlamaCpp();
 
@@ -390,7 +394,7 @@ describe("LlamaCpp Integration", () => {
 // Session Management Tests
 // =============================================================================
 
-describe("LLM Session Management", () => {
+describeIfReal("LLM Session Management", () => {
   describe("withLLMSession", () => {
     test("session provides access to LLM operations", async () => {
       const result = await withLLMSession(async (session) => {

@@ -4,6 +4,8 @@
  * Tests search quality against synthetic documents with known-answer queries.
  * Validates that search improvements don't regress quality.
  *
+ * These tests require actual LLM models and are skipped when QMD_MOCK_LLM=true or CI=true.
+ *
  * Three test suites:
  * 1. BM25 (FTS) - lexical search baseline
  * 2. Vector Search - semantic search with embeddings
@@ -15,6 +17,13 @@ import { mkdtempSync, rmSync, readFileSync, readdirSync } from "fs";
 import { join } from "path";
 import { tmpdir } from "os";
 import type { IDatabase } from "./database";
+
+// Skip evaluation tests when mock mode is enabled
+const isMockMode = Bun.env.QMD_MOCK_LLM === "true" || Bun.env.CI === "true";
+if (isMockMode) {
+  console.log("Skipping eval.test.ts - mock mode enabled");
+  process.exit(0);
+}
 
 // Set INDEX_PATH before importing store to prevent using global index
 const tempDir = mkdtempSync(join(tmpdir(), "qmd-eval-"));
