@@ -548,6 +548,8 @@ async function updateCollections(): Promise<void> {
             // binaries that Bun cannot directly spawn (even though terminal can run them)
             console.log(`${c.dim}    Attempting shell wrapper method...${c.reset}`);
             try {
+              // Note: normalizedCommand is from YAML config which is user-controlled and trusted
+              // This is the last-resort fallback when Bun's entitlements prevent direct execution
               result = Bun.spawnSync(["/bin/sh", "-c", normalizedCommand], {
                 cwd: col.pwd,
                 env: process.env,
