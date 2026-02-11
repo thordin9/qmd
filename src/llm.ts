@@ -1946,6 +1946,8 @@ export function resetDefaultLLMForTests(): void {
   defaultLLMProvider = null;
   defaultLlamaCpp = null;
   defaultOpenRouterLLM = null;
+  defaultOllamaLLM = null;
   defaultSessionManager = null;
   didWarnOpenRouterRemote = false;
+  didWarnOllamaRemote = false;
 }
