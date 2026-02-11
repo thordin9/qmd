@@ -6,9 +6,10 @@
  */
 
 import { describe, test, expect, beforeAll, afterAll, beforeEach } from "bun:test";
-import { mkdtemp, rm, writeFile, mkdir } from "fs/promises";
+import { mkdtemp, rm, writeFile, mkdir, readFile } from "fs/promises";
 import { tmpdir } from "os";
 import { join } from "path";
+import YAML from "yaml";
 
 // Test fixtures directory and database path
 let testDir: string;
@@ -367,6 +368,39 @@ describe("CLI Update Command", () => {
     const { stdout, exitCode } = await runQmd(["update"], { dbPath: localDbPath });
     expect(exitCode).toBe(0);
     expect(stdout).toContain("Updating");
+  });
+
+  test("executes update command with environment variables", async () => {
+    // Create an isolated test environment
+    const { dbPath, configDir } = await createIsolatedTestEnv("update-cmd");
+    
+    // Create a collection with an update command that uses environment variables
+    const collectionName = "update-test";
+    const collectionDir = join(testDir, collectionName);
+    await mkdir(collectionDir, { recursive: true });
+    await writeFile(join(collectionDir, "test.md"), "# Test\n");
+    
+    // Add collection first
+    await runQmd(["collection", "add", collectionDir, "--name", collectionName], 
+                 { dbPath, configDir });
+    
+    // Manually add an update command to the YAML config
+    const configPath = join(configDir, "index.yml");
+    const configContent = await readFile(configPath, "utf-8");
+    const config = YAML.parse(configContent);
+    
+    // Add an update command that verifies environment variables are available
+    // Using 'test -n "$PATH"' to verify PATH is set, then echo success message
+    if (!config.collections[collectionName]) {
+      throw new Error(`Collection ${collectionName} not found in config`);
+    }
+    config.collections[collectionName].update = "test -n \"$PATH\" && echo 'Update successful'";
+    await writeFile(configPath, YAML.stringify(config));
+    
+    // Run update - should succeed with the update command
+    const { stdout, exitCode } = await runQmd(["update"], { dbPath, configDir });
+    expect(exitCode).toBe(0);
+    expect(stdout).toContain("Update successful");
   });
 });
 
@@ -753,6 +787,26 @@ describe("CLI Collection Commands", () => {
     const { stderr: stderr2, exitCode: exitCode2 } = await runQmd(["collection", "rename", "fixtures"], { dbPath: localDbPath });
     expect(exitCode2).toBe(1);
     expect(stderr2).toContain("Usage:");
+  });
+
+  test("add-osx-notes requires --name parameter", async () => {
+    const { stderr, exitCode } = await runQmd(["collection", "add-osx-notes"], { dbPath: localDbPath });
+    expect(exitCode).toBe(1);
+    expect(stderr).toContain("Usage:");
+    expect(stderr).toContain("--name <name>");
+  });
+
+  test("add-osx-notes validates collection name", async () => {
+    const { stderr, exitCode } = await runQmd(["collection", "add-osx-notes", "--name", "invalid name!"], { dbPath: localDbPath });
+    expect(exitCode).toBe(1);
+    expect(stderr).toContain("Invalid collection name");
+  });
+
+  test("add-osx-notes prevents duplicate collection names", async () => {
+    // Try to create an OSX Notes collection with the same name as existing collection
+    const { stderr, exitCode } = await runQmd(["collection", "add-osx-notes", "--name", "fixtures"], { dbPath: localDbPath });
+    expect(exitCode).toBe(1);
+    expect(stderr).toContain("Collection 'fixtures' already exists");
   });
 });
 
