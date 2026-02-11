@@ -1822,7 +1822,7 @@ export function getDefaultLLMProvider(): LLMProvider {
   }
   
   // Only use mock for default "local" provider when mock mode is enabled
-  if (Bun.env.QMD_MOCK_LLM === "true" || Bun.env.CI === "true") {
+  if (process.env.QMD_MOCK_LLM === "true" || process.env.CI === "true") {
     return "mock";
   }
   return "local";
@@ -1846,17 +1846,21 @@ function getDefaultOllamaLLM(): OllamaLLM {
  * Get the default LLM instance (local, OpenRouter, Ollama, or Mock based on environment).
  */
 export function getDefaultLLM(): LLM {
-  // Check if mock mode is enabled
-  if (Bun.env.QMD_MOCK_LLM === "true" || Bun.env.CI === "true") {
+  // Determine which provider to use (respects explicit settings before mock mode)
+  const provider = getDefaultLLMProvider();
+  
+  // Use mock LLM if provider is "mock"
+  if (provider === "mock") {
     const { getMockLLM } = require("./llm.mock.js");
     return getMockLLM();
   }
   
-  const provider = normalizeProvider(process.env.QMD_LLM_PROVIDER);
+  // Return cached LLM if provider hasn't changed
   if (defaultLLM && defaultLLMProvider === provider) {
     return defaultLLM;
   }
 
+  // Dispose old LLM if provider changed
   if (defaultLLM && defaultLLMProvider !== provider) {
     defaultSessionManager = null;
     void defaultLLM.dispose().catch(() => {});
