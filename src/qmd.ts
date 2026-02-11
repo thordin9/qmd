@@ -537,13 +537,14 @@ async function updateCollections(): Promise<void> {
           // try using Bun's $ shell API which may have different permissions
           console.log(`${c.dim}    Retrying with shell...${c.reset}`);
           try {
+            // Note: normalizedCommand comes from YAML config (user-controlled), not external input
             const shellResult = await $`${normalizedCommand}`.cwd(col.pwd).env(process.env).quiet();
             output = shellResult.stdout?.toString() || "";
             errorOutput = shellResult.stderr?.toString() || "";
             exitCode = shellResult.exitCode;
           } catch (shellError: any) {
             // Both methods failed - provide helpful error
-            throw new Error(`Both direct execution and shell execution failed.\nDirect: ${spawnError.message}\nShell: ${shellError.message}\n\nThis may be a macOS permission issue. Try:\n1. Grant Terminal/Bun Full Disk Access in System Preferences\n2. Check if osascript has proper permissions: ls -la /usr/bin/osascript`);
+            throw new Error(`Both direct execution and shell execution failed.\nDirect: ${spawnError.message}\nShell: ${shellError.message}\n\nThis may be a macOS permission issue. Try:\n1. Grant Terminal/Bun "Full Disk Access" in System Settings > Privacy & Security\n2. Restart Terminal/IDE after granting permissions\n3. If issue persists, verify osascript exists and is executable`);
           }
         }
 
