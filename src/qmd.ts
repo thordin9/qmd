@@ -535,7 +535,7 @@ async function updateCollections(): Promise<void> {
         } catch (spawnError: any) {
           // If spawnSync fails (often permission/entitlement issues on macOS),
           // try using Bun's $ shell API which may have different permissions
-          console.log(`${c.dim}    Retrying with shell...${c.reset}`);
+          console.log(`${c.dim}    Attempting fallback method...${c.reset}`);
           try {
             // Note: normalizedCommand comes from YAML config (user-controlled), not external input
             const shellResult = await $`${normalizedCommand}`.cwd(col.pwd).env(process.env).quiet();
@@ -546,8 +546,8 @@ async function updateCollections(): Promise<void> {
             // Both methods failed - provide helpful error with possible causes
             let errorMsg = `Both direct execution and shell execution failed.\nDirect: ${spawnError.message}\nShell: ${shellError.message}\n\n`;
             
-            // Check if it looks like a permission issue (ENOENT/EACCES on macOS)
-            if (spawnError.message.includes('ENOENT') || spawnError.message.includes('EACCES')) {
+            // Check error code directly (more reliable than string matching)
+            if (spawnError.code === 'ENOENT' || spawnError.code === 'EACCES') {
               errorMsg += `This may be a macOS permission issue. Try:\n1. Grant Terminal/Bun "Full Disk Access" in System Settings > Privacy & Security\n2. Restart Terminal/IDE after granting permissions`;
             } else {
               errorMsg += `Possible causes:\n1. Command syntax error in YAML config\n2. Missing or inaccessible binary\n3. macOS permission restrictions`;
