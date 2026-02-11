@@ -391,7 +391,8 @@ describe("CLI Update Command", () => {
     const config = YAML.parse(configContent);
     
     // Add an update command that verifies environment variables are available
-    config.collections["update-test"].update = "echo $PATH > /dev/null && echo 'Update successful'";
+    // Using 'test -n "$PATH"' to verify PATH is set, then echo success message
+    config.collections["update-test"].update = "test -n \"$PATH\" && echo 'Update successful'";
     await writeFile(configPath, YAML.stringify(config));
     
     // Run update - should succeed with the update command
