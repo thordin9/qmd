@@ -183,7 +183,7 @@ export type RerankDocument = {
 /**
  * Backing inference provider
  */
-export type LLMProvider = "local" | "openrouter" | "ollama";
+export type LLMProvider = "local" | "openrouter" | "ollama" | "mock";
 
 // =============================================================================
 // Model Configuration
@@ -1815,6 +1815,10 @@ function warnOllamaOnce(): void {
  * Defaults to local so remote inference is always opt-in.
  */
 export function getDefaultLLMProvider(): LLMProvider {
+  // Check if mock mode is enabled
+  if (Bun.env.QMD_MOCK_LLM === "true" || Bun.env.CI === "true") {
+    return "mock";
+  }
   return defaultLLMProvider ?? normalizeProvider(process.env.QMD_LLM_PROVIDER);
 }
 
