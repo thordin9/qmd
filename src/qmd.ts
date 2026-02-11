@@ -415,6 +415,7 @@ async function updateCollections(): Promise<void> {
       try {
         const proc = Bun.spawn(["/usr/bin/env", "bash", "-c", yamlCol.update], {
           cwd: col.pwd,
+          env: process.env,
           stdout: "pipe",
           stderr: "pipe",
         });
@@ -2579,6 +2580,7 @@ if (import.meta.main) {
           const logPath = resolve(cacheDir, "mcp.log");
           const logFd = openSync(logPath, "w"); // truncate — fresh log per daemon run
           const child = Bun.spawn([process.execPath, import.meta.path, "mcp", "--http", "--port", String(port)], {
+            env: process.env,
             stdout: logFd,
             stderr: logFd,
             stdin: "ignore",

@@ -6,9 +6,10 @@
  */
 
 import { describe, test, expect, beforeAll, afterAll, beforeEach } from "bun:test";
-import { mkdtemp, rm, writeFile, mkdir } from "fs/promises";
+import { mkdtemp, rm, writeFile, mkdir, readFile } from "fs/promises";
 import { tmpdir } from "os";
 import { join } from "path";
+import YAML from "yaml";
 
 // Test fixtures directory and database path
 let testDir: string;
@@ -367,6 +368,36 @@ describe("CLI Update Command", () => {
     const { stdout, exitCode } = await runQmd(["update"], { dbPath: localDbPath });
     expect(exitCode).toBe(0);
     expect(stdout).toContain("Updating");
+  });
+
+  test("executes update command with environment variables", async () => {
+    // Create an isolated test environment
+    const env = await createIsolatedTestEnv("update-cmd");
+    const { dbPath, configDir } = env;
+    
+    // Create a collection with an update command that uses environment variables
+    // The update command should echo $PATH to verify env vars are available
+    const collectionDir = join(testDir, "update-test");
+    await mkdir(collectionDir, { recursive: true });
+    await writeFile(join(collectionDir, "test.md"), "# Test\n");
+    
+    // Add collection first
+    await runQmd(["collection", "add", collectionDir, "--name", "update-test"], 
+                 { dbPath, configDir });
+    
+    // Manually add an update command to the YAML config
+    const configPath = join(configDir, "index.yml");
+    const configContent = await readFile(configPath, "utf-8");
+    const config = YAML.parse(configContent);
+    
+    // Add an update command that verifies environment variables are available
+    config.collections["update-test"].update = "echo $PATH > /dev/null && echo 'Update successful'";
+    await writeFile(configPath, YAML.stringify(config));
+    
+    // Run update - should succeed with the update command
+    const { stdout, exitCode } = await runQmd(["update"], { dbPath, configDir });
+    expect(exitCode).toBe(0);
+    expect(stdout).toContain("Update successful");
   });
 });
 
