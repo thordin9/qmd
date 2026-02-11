@@ -413,7 +413,7 @@ async function updateCollections(): Promise<void> {
     if (yamlCol?.update) {
       console.log(`${c.dim}    Running update command: ${yamlCol.update}${c.reset}`);
       try {
-        const proc = Bun.spawn(["/bin/bash", "-c", yamlCol.update], {
+        const proc = Bun.spawn(["/bin/sh", "-c", yamlCol.update], {
           cwd: col.pwd,
           env: process.env,
           stdout: "pipe",
