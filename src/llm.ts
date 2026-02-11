@@ -1815,11 +1815,17 @@ function warnOllamaOnce(): void {
  * Defaults to local so remote inference is always opt-in.
  */
 export function getDefaultLLMProvider(): LLMProvider {
-  // Check if mock mode is enabled
+  // Respect explicit provider setting first, then check for mock mode
+  const explicitProvider = defaultLLMProvider ?? normalizeProvider(process.env.QMD_LLM_PROVIDER);
+  if (explicitProvider !== "local") {
+    return explicitProvider;
+  }
+  
+  // Only use mock for default "local" provider when mock mode is enabled
   if (Bun.env.QMD_MOCK_LLM === "true" || Bun.env.CI === "true") {
     return "mock";
   }
-  return defaultLLMProvider ?? normalizeProvider(process.env.QMD_LLM_PROVIDER);
+  return "local";
 }
 
 function getDefaultOpenRouterLLM(): OpenRouterLLM {
