@@ -509,47 +509,54 @@ async function updateCollections(): Promise<void> {
           normalizedCommand = '/usr/bin/osascript' + normalizedCommand.substring('osascript'.length);
         }
         
-        const cmdParts = parseShellCommand(normalizedCommand);
-        
-        if (cmdParts.length === 0) {
-          console.error(`${c.yellow}✗ Update command is empty${c.reset}`);
-          process.exit(1);
-        }
+        // Check if command contains shell metacharacters that require shell execution
+        const hasShellMetachars = /[|&;<>()$`\\"\s]/.test(normalizedCommand);
         
         let result;
         let output = "";
         let errorOutput = "";
         let exitCode: number | null = null;  // null indicates execution failure
         
-        // Try direct execution first
-        try {
-          result = Bun.spawnSync(cmdParts, {
-            cwd: col.pwd,
-            env: process.env,
-            stdout: "pipe",
-            stderr: "pipe",
-          });
-          output = result.stdout?.toString() || "";
-          errorOutput = result.stderr?.toString() || "";
-          exitCode = result.exitCode;
-        } catch (spawnError: any) {
-          // If spawnSync fails (often permission/entitlement issues on macOS),
-          // try using Bun's $ shell API which may have different permissions
-          console.log(`${c.dim}    Attempting fallback method...${c.reset}`);
+        // If command has shell metacharacters, skip direct execution and use shell
+        if (hasShellMetachars) {
           try {
-            // Note: normalizedCommand comes from YAML config (user-controlled), not external input
-            const shellResult = await $`${normalizedCommand}`.cwd(col.pwd).env(process.env).quiet();
-            output = shellResult.stdout?.toString() || "";
-            errorOutput = shellResult.stderr?.toString() || "";
-            exitCode = shellResult.exitCode;
+            // Execute via /bin/sh for commands with shell features
+            result = Bun.spawnSync(["/bin/sh", "-c", normalizedCommand], {
+              cwd: col.pwd,
+              env: process.env,
+              stdout: "pipe",
+              stderr: "pipe",
+            });
+            output = result.stdout?.toString() || "";
+            errorOutput = result.stderr?.toString() || "";
+            exitCode = result.exitCode;
           } catch (shellError: any) {
-            // If Bun.$ also fails, try executing via /bin/sh wrapper
-            // This works around Bun entitlement restrictions where the shell can execute
-            // binaries that Bun cannot directly spawn (even though terminal can run them)
+            throw new Error(`Failed to execute update command: ${shellError.message}`);
+          }
+        } else {
+          // For simple commands, try direct execution first
+          const cmdParts = parseShellCommand(normalizedCommand);
+          
+          if (cmdParts.length === 0) {
+            console.error(`${c.yellow}✗ Update command is empty${c.reset}`);
+            process.exit(1);
+          }
+          
+          try {
+            result = Bun.spawnSync(cmdParts, {
+              cwd: col.pwd,
+              env: process.env,
+              stdout: "pipe",
+              stderr: "pipe",
+            });
+            output = result.stdout?.toString() || "";
+            errorOutput = result.stderr?.toString() || "";
+            exitCode = result.exitCode;
+          } catch (spawnError: any) {
+            // If spawnSync fails (often permission/entitlement issues on macOS),
+            // try using /bin/sh wrapper as fallback
             console.log(`${c.dim}    Attempting shell wrapper method...${c.reset}`);
             try {
-              // Note: normalizedCommand is from YAML config which is user-controlled and trusted
-              // This is the last-resort fallback when Bun's entitlements prevent direct execution
               result = Bun.spawnSync(["/bin/sh", "-c", normalizedCommand], {
                 cwd: col.pwd,
                 env: process.env,
@@ -559,9 +566,9 @@ async function updateCollections(): Promise<void> {
               output = result.stdout?.toString() || "";
               errorOutput = result.stderr?.toString() || "";
               exitCode = result.exitCode;
-            } catch (shellWrapperError: any) {
-              // All three methods failed - provide helpful error
-              let errorMsg = `All execution methods failed.\nDirect: ${spawnError.message}\nShell API: ${shellError.message}\nShell wrapper: ${shellWrapperError.message}\n\n`;
+            } catch (shellError: any) {
+              // Both direct execution and shell wrapper failed
+              let errorMsg = `Failed to execute update command.\nDirect: ${spawnError.message}\nShell wrapper: ${shellError.message}\n\n`;
               
               // Check error code directly (more reliable than string matching)
               if (spawnError.code === 'ENOENT' || spawnError.code === 'EACCES') {
