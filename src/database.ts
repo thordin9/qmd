@@ -430,17 +430,18 @@ class PostgresStatement implements IStatement {
           const header = headers[j];
           let value: unknown = j < values.length ? values[j] : '';
           
-          // Convert to appropriate type
-          // Note: We're conservative with number conversion to avoid converting string IDs
+          // Convert to appropriate type based on psql output
           if (value === '' || value === null) {
             value = null;
           } else if (value === 't') {
             value = true;
           } else if (value === 'f') {
             value = false;
+          } else if (typeof value === 'string' && /^-?\d+(\.\d+)?$/.test(value)) {
+            // Convert numeric strings to numbers
+            // PostgreSQL outputs numbers as strings, so we need to convert them
+            value = Number(value);
           }
-          // Note: We don't auto-convert numeric strings to numbers as they could be IDs/hashes
-          // PostgreSQL will return actual numbers as numbers through its type system
           
           row[header] = value;
         }
