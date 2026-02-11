@@ -501,7 +501,15 @@ async function updateCollections(): Promise<void> {
         // Note: This does not support shell features like pipes (|), redirects (>),
         // environment variable expansion ($VAR), or command substitution ($(cmd))
         // The OSX Notes update command is a simple osascript invocation which works fine
-        const cmdParts = parseShellCommand(yamlCol.update);
+        
+        // Normalize osascript path for backward compatibility with existing collections
+        // Collections created before absolute path fix may have 'osascript' instead of '/usr/bin/osascript'
+        let normalizedCommand = yamlCol.update;
+        if (normalizedCommand.startsWith('osascript ')) {
+          normalizedCommand = '/usr/bin/osascript' + normalizedCommand.substring('osascript'.length);
+        }
+        
+        const cmdParts = parseShellCommand(normalizedCommand);
         
         if (cmdParts.length === 0) {
           console.error(`${c.yellow}✗ Update command is empty${c.reset}`);
