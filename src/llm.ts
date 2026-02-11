@@ -171,7 +171,7 @@ export type RerankDocument = {
 /**
  * Backing inference provider
  */
-export type LLMProvider = "local" | "openrouter";
+export type LLMProvider = "local" | "openrouter" | "ollama";
 
 // =============================================================================
 // Model Configuration
@@ -191,11 +191,19 @@ const DEFAULT_OPENROUTER_GENERATE_MODEL = "openai/gpt-4o-mini";
 const DEFAULT_OPENROUTER_RERANK_MODEL = "openai/text-embedding-3-small";
 const DEFAULT_OPENROUTER_API_KEY_FILE = join(homedir(), ".config", "qmd", "openrouter.key");
 
+const DEFAULT_OLLAMA_BASE_URL = "http://localhost:11434";
+const DEFAULT_OLLAMA_EMBED_MODEL = "nomic-embed-text";
+const DEFAULT_OLLAMA_GENERATE_MODEL = "llama3.2";
+const DEFAULT_OLLAMA_RERANK_MODEL = "nomic-embed-text";
+const DEFAULT_OLLAMA_API_KEY_FILE = join(homedir(), ".config", "qmd", "ollama.key");
+
 export const DEFAULT_EMBED_MODEL_URI = DEFAULT_EMBED_MODEL;
 export const DEFAULT_RERANK_MODEL_URI = DEFAULT_RERANK_MODEL;
 export const DEFAULT_GENERATE_MODEL_URI = DEFAULT_GENERATE_MODEL;
 export const DEFAULT_OPENROUTER_BASE_URL_URI = DEFAULT_OPENROUTER_BASE_URL;
 export const DEFAULT_OPENROUTER_API_KEY_PATH = DEFAULT_OPENROUTER_API_KEY_FILE;
+export const DEFAULT_OLLAMA_BASE_URL_URI = DEFAULT_OLLAMA_BASE_URL;
+export const DEFAULT_OLLAMA_API_KEY_PATH = DEFAULT_OLLAMA_API_KEY_FILE;
 
 // Local model cache directory
 const MODEL_CACHE_DIR = join(homedir(), ".cache", "qmd", "models");
@@ -295,7 +303,7 @@ export async function pullModels(
 
 function normalizeProvider(provider: string | undefined): LLMProvider {
   const value = (provider || DEFAULT_PROVIDER).trim().toLowerCase();
-  if (value === "local" || value === "openrouter") {
+  if (value === "local" || value === "openrouter" || value === "ollama") {
     return value;
   }
   console.error(`Unknown QMD_LLM_PROVIDER="${provider}". Falling back to "local".`);
@@ -669,6 +677,290 @@ export class OpenRouterLLM implements LLM {
       };
     } catch (error) {
       console.error("OpenRouter rerank error:", error);
+      return {
+        results: documents.map((doc, index) => ({ file: doc.file, index, score: 0 })),
+        model: options.model || this.rerankModelUri,
+      };
+    }
+  }
+
+  async dispose(): Promise<void> {
+    // No local resources to dispose.
+  }
+}
+
+// =============================================================================
+// Ollama Implementation
+// =============================================================================
+
+type OllamaEmbedResponse = {
+  embeddings?: number[][];
+  model?: string;
+};
+
+type OllamaGenerateResponse = {
+  model?: string;
+  created_at?: string;
+  response?: string;
+  done?: boolean;
+  done_reason?: string;
+};
+
+export type OllamaConfig = {
+  apiKey?: string;
+  apiKeyFile?: string;
+  baseUrl?: string;
+  embedModel?: string;
+  generateModel?: string;
+  rerankModel?: string;
+  requestTimeoutMs?: number;
+};
+
+function loadOllamaApiKey(config: OllamaConfig): string | null {
+  // Try environment variable first
+  const envKey = process.env.QMD_OLLAMA_API_KEY?.trim() || process.env.OLLAMA_API_KEY?.trim();
+  if (envKey) return envKey;
+
+  // Try config-provided key
+  if (config.apiKey) return config.apiKey;
+
+  // Try key file
+  const keyFileEnv = process.env.QMD_OLLAMA_API_KEY_FILE;
+  const keyFile = config.apiKeyFile || keyFileEnv || DEFAULT_OLLAMA_API_KEY_FILE;
+  if (existsSync(keyFile)) {
+    const key = readFileSync(keyFile, "utf-8").trim();
+    if (key) return key;
+
+    // If the user explicitly configured an API key file (via config or env)
+    // and that file is empty, surface an explicit error instead of silently
+    // treating it as "no key". This helps avoid confusing auth failures.
+    const isExplicitFile =
+      (config.apiKeyFile && keyFile === config.apiKeyFile) ||
+      (keyFileEnv && keyFile === keyFileEnv);
+    if (isExplicitFile) {
+      throw new Error(
+        `Ollama API key file "${keyFile}" is empty. ` +
+          `Please add an API key to this file or unset the apiKeyFile/QMD_OLLAMA_API_KEY_FILE setting.`
+      );
+    }
+  }
+
+  // No API key found - this is okay for local Ollama
+  return null;
+}
+
+export class OllamaLLM implements LLM {
+  private apiKey: string | null;
+  private baseUrl: string;
+  private embedModelUri: string;
+  private generateModelUri: string;
+  private rerankModelUri: string;
+  private requestTimeoutMs: number;
+
+  constructor(config: OllamaConfig = {}) {
+    this.apiKey = loadOllamaApiKey(config);
+    this.baseUrl = stripTrailingSlash(config.baseUrl || process.env.QMD_OLLAMA_BASE_URL || DEFAULT_OLLAMA_BASE_URL);
+    this.embedModelUri = config.embedModel || process.env.QMD_OLLAMA_EMBED_MODEL || DEFAULT_OLLAMA_EMBED_MODEL;
+    this.generateModelUri = config.generateModel || process.env.QMD_OLLAMA_GENERATE_MODEL || DEFAULT_OLLAMA_GENERATE_MODEL;
+    this.rerankModelUri = config.rerankModel || process.env.QMD_OLLAMA_RERANK_MODEL || DEFAULT_OLLAMA_RERANK_MODEL;
+    this.requestTimeoutMs = config.requestTimeoutMs ?? 60_000;
+  }
+
+  private async postJson<T>(path: string, payload: unknown): Promise<T> {
+    const url = `${this.baseUrl}${path}`;
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), this.requestTimeoutMs);
+
+    try {
+      const headers: Record<string, string> = {
+        "Content-Type": "application/json",
+      };
+      
+      // Add authorization header if API key is present
+      if (this.apiKey) {
+        headers.Authorization = `Bearer ${this.apiKey}`;
+      }
+
+      const response = await fetch(url, {
+        method: "POST",
+        headers,
+        body: JSON.stringify(payload),
+        signal: controller.signal,
+      });
+
+      const raw = await response.text();
+      if (!response.ok) {
+        const body = raw.slice(0, 500);
+        throw new Error(`Ollama ${path} failed (${response.status}): ${body}`);
+      }
+
+      return JSON.parse(raw) as T;
+    } finally {
+      clearTimeout(timeout);
+    }
+  }
+
+  private async requestEmbeddings(input: string | string[], model: string): Promise<number[][]> {
+    const response = await this.postJson<OllamaEmbedResponse>("/api/embed", {
+      model,
+      input: Array.isArray(input) ? input : [input],
+    });
+
+    if (!Array.isArray(response.embeddings)) {
+      return [];
+    }
+
+    return response.embeddings;
+  }
+
+  async embed(text: string, options: EmbedOptions = {}): Promise<EmbeddingResult | null> {
+    try {
+      const model = options.model || this.embedModelUri;
+      const vectors = await this.requestEmbeddings(text, model);
+      const vector = vectors[0];
+      if (!vector || vector.length === 0) {
+        throw new Error("Ollama embedding response missing embedding vector");
+      }
+
+      return { embedding: vector, model };
+    } catch (error) {
+      console.error("Ollama embedding error:", error);
+      return null;
+    }
+  }
+
+  async embedBatch(texts: string[]): Promise<(EmbeddingResult | null)[]> {
+    if (texts.length === 0) return [];
+    try {
+      const data = await this.requestEmbeddings(texts, this.embedModelUri);
+
+      return texts.map((_, i) => {
+        const vector = data[i];
+        if (!vector || vector.length === 0) return null;
+        return { embedding: vector, model: this.embedModelUri };
+      });
+    } catch (error) {
+      console.error("Ollama batch embedding error:", error);
+      return texts.map(() => null);
+    }
+  }
+
+  async generate(prompt: string, options: GenerateOptions = {}): Promise<GenerateResult | null> {
+    try {
+      const model = options.model || this.generateModelUri;
+      const response = await this.postJson<OllamaGenerateResponse>("/api/generate", {
+        model,
+        prompt,
+        stream: false,
+        options: {
+          temperature: options.temperature ?? 0.7,
+          num_predict: options.maxTokens ?? 150,
+        },
+      });
+
+      const content = response.response;
+      if (!content) {
+        throw new Error("Ollama generate response missing content");
+      }
+
+      return {
+        text: content,
+        model,
+        done: response.done ?? true,
+      };
+    } catch (error) {
+      console.error("Ollama generation error:", error);
+      return null;
+    }
+  }
+
+  async modelExists(model: string): Promise<ModelInfo> {
+    // Ollama doesn't have a simple "check if model exists" endpoint
+    // We'll assume the model exists - Ollama will download it on first use
+    return { name: model, exists: true };
+  }
+
+  async expandQuery(query: string, options: { context?: string; includeLexical?: boolean } = {}): Promise<Queryable[]> {
+    const includeLexical = options.includeLexical ?? true;
+    const context = options.context;
+    const contextBlock = context ? `Context: ${context}\n` : "";
+    const lexicalRule = includeLexical
+      ? "You may use lex, vec, and hyde query types."
+      : "Use only vec and hyde query types (no lex entries).";
+
+    const prompt = [
+      "Expand the search query into short retrieval variants.",
+      "Output only lines in this exact format: type: text",
+      "Allowed type values: lex, vec, hyde.",
+      lexicalRule,
+      "Keep at least one important term from the original query in each line.",
+      contextBlock,
+      `Original query: ${query}`,
+    ].filter(Boolean).join("\n");
+
+    try {
+      const response = await this.postJson<OllamaGenerateResponse>("/api/generate", {
+        model: this.generateModelUri,
+        prompt,
+        stream: false,
+        options: {
+          temperature: 0.2,
+          num_predict: 300,
+        },
+      });
+
+      const content = response.response || "";
+      return parseExpandedQueryLines(content, query, includeLexical);
+    } catch (error) {
+      console.error("Ollama query expansion error:", error);
+      const fallback: Queryable[] = [{ type: "vec", text: query }];
+      if (includeLexical) fallback.unshift({ type: "lex", text: query });
+      return fallback;
+    }
+  }
+
+  async rerank(
+    query: string,
+    documents: RerankDocument[],
+    options: RerankOptions = {}
+  ): Promise<RerankResult> {
+    if (documents.length === 0) {
+      return { results: [], model: options.model || this.rerankModelUri };
+    }
+
+    try {
+      const model = options.model || this.rerankModelUri;
+      
+      // Batch query and document texts into a single embeddings request
+      const docTexts = documents.map((d) => d.text);
+      const allTexts = [query, ...docTexts];
+      const allEmbeddings = await this.requestEmbeddings(allTexts, model);
+
+      const queryEmbedding = allEmbeddings[0];
+      if (!queryEmbedding || queryEmbedding.length === 0) {
+        throw new Error("Ollama rerank: failed to get query embedding");
+      }
+
+      const docEmbeddings = allEmbeddings.slice(1);
+
+      const scored = documents.map((doc, i) => {
+        const docEmbed = docEmbeddings[i];
+        const rawScore = docEmbed && docEmbed.length > 0
+          ? cosineSimilarity(queryEmbedding, docEmbed)
+          : -1;
+        // Normalize cosine [-1,1] -> [0,1] for consistency with rerank pipeline
+        const score = (rawScore + 1) / 2;
+        return { file: doc.file, index: i, score };
+      });
+
+      scored.sort((a, b) => b.score - a.score);
+
+      return {
+        results: scored,
+        model,
+      };
+    } catch (error) {
+      console.error("Ollama rerank error:", error);
       return {
         results: documents.map((doc, index) => ({ file: doc.file, index, score: 0 })),
         model: options.model || this.rerankModelUri,
@@ -1459,9 +1751,11 @@ class LLMSession implements ILLMSession {
 let defaultSessionManager: LLMSessionManager | null = null;
 let defaultLlamaCpp: LlamaCpp | null = null;
 let defaultOpenRouterLLM: OpenRouterLLM | null = null;
+let defaultOllamaLLM: OllamaLLM | null = null;
 let defaultLLM: LLM | null = null;
 let defaultLLMProvider: LLMProvider | null = null;
 let didWarnOpenRouterRemote = false;
+let didWarnOllamaRemote = false;
 
 /**
  * Emit the remote-provider notice once per process.
@@ -1471,6 +1765,18 @@ function warnOpenRouterOnce(): void {
   didWarnOpenRouterRemote = true;
   process.stderr.write(
     "Notice: QMD is using OpenRouter (remote inference over HTTPS) for model operations.\n"
+  );
+}
+
+/**
+ * Emit the Ollama remote-provider notice once per process.
+ */
+function warnOllamaOnce(): void {
+  if (didWarnOllamaRemote) return;
+  didWarnOllamaRemote = true;
+  const baseUrl = process.env.QMD_OLLAMA_BASE_URL || DEFAULT_OLLAMA_BASE_URL;
+  process.stderr.write(
+    `Notice: QMD is using Ollama at ${baseUrl} for model operations.\n`
   );
 }
 
@@ -1489,8 +1795,15 @@ function getDefaultOpenRouterLLM(): OpenRouterLLM {
   return defaultOpenRouterLLM;
 }
 
+function getDefaultOllamaLLM(): OllamaLLM {
+  if (!defaultOllamaLLM) {
+    defaultOllamaLLM = new OllamaLLM();
+  }
+  return defaultOllamaLLM;
+}
+
 /**
- * Get the default LLM instance (local or OpenRouter based on QMD_LLM_PROVIDER).
+ * Get the default LLM instance (local, OpenRouter, or Ollama based on QMD_LLM_PROVIDER).
  */
 export function getDefaultLLM(): LLM {
   const provider = normalizeProvider(process.env.QMD_LLM_PROVIDER);
@@ -1508,6 +1821,13 @@ export function getDefaultLLM(): LLM {
     warnOpenRouterOnce();
     defaultLLM = getDefaultOpenRouterLLM();
     defaultLLMProvider = "openrouter";
+    return defaultLLM;
+  }
+
+  if (provider === "ollama") {
+    warnOllamaOnce();
+    defaultLLM = getDefaultOllamaLLM();
+    defaultLLMProvider = "ollama";
     return defaultLLM;
   }
 
@@ -1636,6 +1956,8 @@ export function resetDefaultLLMForTests(): void {
   defaultLLMProvider = null;
   defaultLlamaCpp = null;
   defaultOpenRouterLLM = null;
+  defaultOllamaLLM = null;
   defaultSessionManager = null;
   didWarnOpenRouterRemote = false;
+  didWarnOllamaRemote = false;
 }

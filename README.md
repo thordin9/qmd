@@ -2,7 +2,7 @@
 
 An on-device search engine for everything you need to remember. Index your markdown notes, meeting transcripts, documentation, and knowledge bases. Search with keywords or natural language. Ideal for your agentic flows.
 
-QMD combines BM25 full-text search, vector semantic search, and LLM re-ranking. By default it runs locally via node-llama-cpp with GGUF models, with optional OpenRouter-backed inference.
+QMD combines BM25 full-text search, vector semantic search, and LLM re-ranking. By default it runs locally via node-llama-cpp with GGUF models, with optional OpenRouter- or Ollama-backed inference.
 
 ## Quick Start
 
@@ -277,6 +277,48 @@ Optional model overrides:
 - `QMD_OPENROUTER_EMBED_MODEL`
 - `QMD_OPENROUTER_GENERATE_MODEL`
 - `QMD_OPENROUTER_RERANK_MODEL`
+
+### Ollama Mode (Optional)
+
+QMD can use Ollama (local or remote) for embeddings, query expansion, and reranking:
+
+```sh
+export QMD_LLM_PROVIDER=ollama
+# Optional: specify Ollama endpoint (default: http://localhost:11434)
+export QMD_OLLAMA_BASE_URL="http://localhost:11434"
+```
+
+When Ollama mode is active, QMD prints a single notice per process showing the endpoint being used.
+
+For cloud Ollama endpoints requiring authentication:
+
+```sh
+export QMD_LLM_PROVIDER=ollama
+export QMD_OLLAMA_BASE_URL="https://your-ollama-endpoint.com"
+export QMD_OLLAMA_API_KEY="your-api-key"
+```
+
+You can also store the key in a file:
+
+```sh
+mkdir -p ~/.config/qmd
+chmod 700 ~/.config/qmd
+printf '%s\n' 'your-api-key' > ~/.config/qmd/ollama.key
+chmod 600 ~/.config/qmd/ollama.key
+export QMD_LLM_PROVIDER=ollama
+```
+
+Supported key env vars:
+- `QMD_OLLAMA_API_KEY` (preferred)
+- `OLLAMA_API_KEY`
+- `QMD_OLLAMA_API_KEY_FILE` (custom key file path)
+
+Optional model overrides (defaults shown):
+- `QMD_OLLAMA_EMBED_MODEL` (default: `nomic-embed-text`)
+- `QMD_OLLAMA_GENERATE_MODEL` (default: `llama3.2`)
+- `QMD_OLLAMA_RERANK_MODEL` (default: `nomic-embed-text`)
+
+**Note:** Ollama will automatically download models on first use if they're not already present.
 
 ## Installation
 
