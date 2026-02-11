@@ -460,6 +460,7 @@ function parseShellCommand(command: string): string[] {
   }
 
   // Warn about unclosed quotes (but still return the parsed args)
+  // We continue execution as the command might still work - e.g., trailing quote at end
   if (inQuotes) {
     console.warn(`${c.yellow}Warning: Unclosed quote (${currentQuoteChar}) in command: ${command}${c.reset}`);
   }
@@ -503,7 +504,7 @@ async function updateCollections(): Promise<void> {
         const cmdParts = parseShellCommand(yamlCol.update);
         
         if (cmdParts.length === 0) {
-          console.log(`${c.yellow}✗ Update command is empty${c.reset}`);
+          console.error(`${c.yellow}✗ Update command is empty${c.reset}`);
           process.exit(1);
         }
         
