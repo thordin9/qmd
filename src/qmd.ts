@@ -422,7 +422,12 @@ async function updateCollections(): Promise<void> {
 
         const output = result.stdout?.toString() || "";
         const errorOutput = result.stderr?.toString() || "";
-        const exitCode = result.exitCode ?? 0;
+        const exitCode = result.exitCode;
+
+        if (exitCode === null || exitCode === undefined) {
+          console.log(`${c.yellow}✗ Update command failed to execute${c.reset}`);
+          process.exit(1);
+        }
 
         if (output.trim()) {
           console.log(output.trim().split('\n').map(l => `    ${l}`).join('\n'));
