@@ -413,16 +413,16 @@ async function updateCollections(): Promise<void> {
     if (yamlCol?.update) {
       console.log(`${c.dim}    Running update command: ${yamlCol.update}${c.reset}`);
       try {
-        const proc = Bun.spawn(["/bin/sh", "-c", yamlCol.update], {
+        const result = Bun.spawnSync(["/bin/sh", "-c", yamlCol.update], {
           cwd: col.pwd,
           env: process.env,
           stdout: "pipe",
           stderr: "pipe",
         });
 
-        const output = await new Response(proc.stdout).text();
-        const errorOutput = await new Response(proc.stderr).text();
-        const exitCode = await proc.exited;
+        const output = result.stdout?.toString() || "";
+        const errorOutput = result.stderr?.toString() || "";
+        const exitCode = result.exitCode ?? 0;
 
         if (output.trim()) {
           console.log(output.trim().split('\n').map(l => `    ${l}`).join('\n'));
