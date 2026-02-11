@@ -305,9 +305,9 @@ class PostgresStatement implements IStatement {
     private sql: string
   ) {}
   
-  private executePsql(sql: string, params: DatabaseValue[] = []): { stdout: string; stderr: string; exitCode: number } {
-    // Build psql connection string
-    const connStr = `postgresql://${this.config.user}:${this.config.password}@${this.config.host}:${this.config.port}/${this.config.database}`;
+  private executePsql(sql: string, params: DatabaseValue[] = []): { rows: QueryResults; stdout: string; stderr: string; exitCode: number } {
+    // Build psql connection string (without password for security)
+    const connStr = `postgresql://${this.config.user}@${this.config.host}:${this.config.port}/${this.config.database}`;
     
     // Substitute parameters in SQL (simple positional replacement)
     let parameterizedSql = sql;
@@ -320,16 +320,78 @@ class PostgresStatement implements IStatement {
       parameterizedSql = parameterizedSql.replace(new RegExp(`\\$${i + 1}\\b`), value);
     }
     
-    // Execute via psql
-    const result = Bun.spawnSync(['psql', connStr, '-t', '-A', '-c', parameterizedSql], {
-      env: process.env,
+    // Execute via psql with -A (unaligned) -F '|' (pipe delimiter) and get column headers
+    const result = Bun.spawnSync(['psql', connStr, '-A', '-F', '|', '--no-psqlrc', '-c', parameterizedSql], {
+      env: {
+        ...process.env,
+        PGPASSWORD: this.config.password,
+        PAGER: '', // Disable pager
+      },
       stderr: 'pipe',
       stdout: 'pipe',
     });
     
+    const stdout = result.stdout.toString();
+    const stderr = result.stderr.toString();
+    
+    // Parse psql output: first line is column names, then data rows
+    const lines = stdout.split('\n');
+    const rows: QueryResults = [];
+    
+    // Find the header line and data lines
+    let headerIdx = -1;
+    
+    // Find header (first non-empty line)
+    for (let i = 0; i < lines.length; i++) {
+      if (lines[i] && !lines[i].startsWith('(')) {
+        headerIdx = i;
+        break;
+      }
+    }
+    
+    if (headerIdx >= 0) {
+      const headers = lines[headerIdx].split('|');
+      
+      // Find where data ends (before row count line)
+      let dataEndIdx = lines.length;
+      for (let i = headerIdx + 1; i < lines.length; i++) {
+        if (lines[i].startsWith('(') && lines[i].includes('row')) {
+          dataEndIdx = i;
+          break;
+        }
+      }
+      
+      // Process data lines (everything between header and row count)
+      for (let i = headerIdx + 1; i < dataEndIdx; i++) {
+        const line = lines[i];
+        const values = line === '' ? [] : line.split('|');
+        const row: Record<string, unknown> = {};
+        
+        for (let j = 0; j < headers.length; j++) {
+          const header = headers[j];
+          let value: unknown = j < values.length ? values[j] : '';
+          
+          // Try to convert to appropriate type
+          if (value === '' || value === null) {
+            value = null;
+          } else if (value === 't') {
+            value = true;
+          } else if (value === 'f') {
+            value = false;
+          } else if (!isNaN(Number(value)) && value !== '') {
+            value = Number(value);
+          }
+          
+          row[header] = value;
+        }
+        rows.push(row);
+      }
+    }
+    
     return {
-      stdout: result.stdout.toString(),
-      stderr: result.stderr.toString(),
+      rows,
+      stdout,
+      stderr,
       exitCode: result.exitCode,
     };
   }
@@ -340,13 +402,7 @@ class PostgresStatement implements IStatement {
       throw new Error(`PostgreSQL query failed: ${result.stderr}`);
     }
     
-    const lines = result.stdout.trim().split('\n').filter(l => l);
-    if (lines.length === 0) return null;
-    
-    // Parse first line as pipe-delimited values
-    const values = lines[0].split('|');
-    // This is a simplified parser - would need column names from metadata
-    return { value: values[0] } as QueryResult;
+    return result.rows.length > 0 ? result.rows[0] : null;
   }
   
   all(...params: DatabaseValue[]): QueryResults {
@@ -355,11 +411,7 @@ class PostgresStatement implements IStatement {
       throw new Error(`PostgreSQL query failed: ${result.stderr}`);
     }
     
-    const lines = result.stdout.trim().split('\n').filter(l => l);
-    return lines.map(line => {
-      const values = line.split('|');
-      return { value: values[0] } as Record<string, unknown>;
-    });
+    return result.rows;
   }
   
   run(...params: DatabaseValue[]): MutationResult {
@@ -368,8 +420,8 @@ class PostgresStatement implements IStatement {
       throw new Error(`PostgreSQL query failed: ${result.stderr}`);
     }
     
-    // Try to extract row count from output
-    const match = result.stdout.match(/(\d+)/);
+    // Try to extract row count from output (e.g., "INSERT 0 1" or "UPDATE 3")
+    const match = result.stdout.match(/(?:INSERT|UPDATE|DELETE)\s+\d+\s+(\d+)/);
     const changes = match ? parseInt(match[1], 10) : 0;
     
     return {
@@ -403,9 +455,12 @@ export class PostgresDatabase implements IDatabase {
   }
   
   exec(sql: string): void {
-    const connStr = `postgresql://${this.config.user}:${this.config.password}@${this.config.host}:${this.config.port}/${this.config.database}`;
+    const connStr = `postgresql://${this.config.user}@${this.config.host}:${this.config.port}/${this.config.database}`;
     const result = Bun.spawnSync(['psql', connStr, '-c', sql], {
-      env: process.env,
+      env: {
+        ...process.env,
+        PGPASSWORD: this.config.password,
+      },
       stderr: 'pipe',
       stdout: 'pipe',
     });

@@ -339,14 +339,14 @@ describeIfPostgres("PostgreSQL Database Implementation", () => {
   });
 
   describe("Native Database Access", () => {
-    test("getNativeDatabase returns underlying pool", () => {
+    test("getNativeDatabase returns underlying config", () => {
       const config = getTestConfig();
       db = createPostgresDatabase(config);
       const nativeDb = db.getNativeDatabase();
       
       expect(nativeDb).toBeDefined();
-      expect(typeof (nativeDb as any).connect).toBe('function');
-      expect(typeof (nativeDb as any).end).toBe('function');
+      expect((nativeDb as any).host).toBe(config.host);
+      expect((nativeDb as any).database).toBe(config.database);
     });
 
     test("supportsExtensions returns false for PostgreSQL", () => {
