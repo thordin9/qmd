@@ -2,7 +2,7 @@
 
 An on-device search engine for everything you need to remember. Index your markdown notes, meeting transcripts, documentation, and knowledge bases. Search with keywords or natural language. Ideal for your agentic flows.
 
-QMD combines BM25 full-text search, vector semantic search, and LLM re-ranking. By default it runs locally via node-llama-cpp with GGUF models, with optional OpenRouter or Ollama-backed inference.
+QMD combines BM25 full-text search, vector semantic search, and LLM re-ranking. By default it runs locally via node-llama-cpp with GGUF models, with optional OpenRouter- or Ollama-backed inference.
 
 ## Quick Start
 
