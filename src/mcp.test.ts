@@ -16,12 +16,13 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import YAML from "yaml";
 import type { CollectionConfig } from "./collections";
+import type { IDatabase } from "./database";
 
 // =============================================================================
 // Test Database Setup
 // =============================================================================
 
-let testDb: Database;
+let testDb: IDatabase;
 let testDbPath: string;
 let testConfigDir: string;
 
@@ -30,8 +31,9 @@ afterAll(async () => {
   await disposeDefaultLlamaCpp();
 });
 
-function initTestDatabase(db: Database): void {
-  sqliteVec.load(db);
+function initTestDatabase(db: IDatabase): void {
+  const nativeDb = db.getNativeDatabase() as Database;
+  sqliteVec.load(nativeDb);
   db.exec("PRAGMA journal_mode = WAL");
 
   // Content-addressable storage - the source of truth for document content
@@ -104,7 +106,7 @@ function initTestDatabase(db: Database): void {
   db.exec(`CREATE VIRTUAL TABLE IF NOT EXISTS vectors_vec USING vec0(hash_seq TEXT PRIMARY KEY, embedding float[768] distance_metric=cosine)`);
 }
 
-function seedTestData(db: Database): void {
+function seedTestData(db: IDatabase): void {
   const now = new Date().toISOString();
 
   // Note: Collections are now managed in YAML config, not in database
@@ -226,7 +228,8 @@ describe("MCP Server", () => {
     await writeFile(join(testConfigDir, "index.yml"), YAML.stringify(testConfig));
 
     testDbPath = `/tmp/qmd-mcp-test-${Date.now()}.sqlite`;
-    testDb = new Database(testDbPath);
+    const store = createStore(testDbPath);
+    testDb = store.db;
     initTestDatabase(testDb);
     seedTestData(testDb);
   });
@@ -306,13 +309,14 @@ describe("MCP Server", () => {
     });
 
     test("returns empty when no vector table exists", async () => {
-      const emptyDb = new Database(":memory:");
+      const emptyStore = createStore(":memory:");
+      const emptyDb = emptyStore.db;
       initTestDatabase(emptyDb);
       emptyDb.exec("DROP TABLE IF EXISTS vectors_vec");
 
       const results = await searchVec(emptyDb, "test", DEFAULT_EMBED_MODEL, 10);
       expect(results.length).toBe(0);
-      emptyDb.close();
+      emptyStore.close();
     });
   });
 
@@ -880,10 +884,11 @@ describe("MCP HTTP Transport", () => {
   beforeAll(async () => {
     // Create isolated test database with seeded data
     httpTestDbPath = `/tmp/qmd-mcp-http-test-${Date.now()}.sqlite`;
-    const db = new Database(httpTestDbPath);
+    const store = createStore(httpTestDbPath);
+    const db = store.db;
     initTestDatabase(db);
     seedTestData(db);
-    db.close();
+    store.close();
 
     // Create isolated YAML config
     const configPrefix = join(tmpdir(), `qmd-mcp-http-config-${Date.now()}-${Math.random().toString(36).slice(2)}`);
@@ -932,7 +937,7 @@ describe("MCP HTTP Transport", () => {
     const res = await fetch(`${baseUrl}/health`);
     expect(res.status).toBe(200);
     expect(res.headers.get("content-type")).toContain("application/json");
-    const body = await res.json();
+    const body = await res.json() as { status: string; uptime: number };
     expect(body.status).toBe("ok");
     expect(typeof body.uptime).toBe("number");
   });

@@ -7,12 +7,12 @@
  */
 
 import { describe, test, expect, beforeAll, afterAll, beforeEach, afterEach, mock, spyOn } from "bun:test";
-import { Database } from "bun:sqlite";
 import { unlink, mkdtemp, rmdir, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import YAML from "yaml";
 import { disposeDefaultLlamaCpp } from "./llm.js";
+import { type IDatabase } from "./database.js";
 import {
   createStore,
   getDefaultDbPath,
@@ -105,7 +105,7 @@ async function cleanupTestDb(store: Store): Promise<void> {
 
 // Helper to insert a test document directly into the database
 async function insertTestDocument(
-  db: Database,
+  db: IDatabase,
   collectionName: string,
   opts: {
     name?: string;
@@ -418,7 +418,11 @@ describe("Store Creation", () => {
   test("createStore creates a new store with custom path", async () => {
     const store = await createTestStore();
     expect(store.dbPath).toBe(testDbPath);
-    expect(store.db).toBeInstanceOf(Database);
+    // Check that db implements the IDatabase interface
+    expect(typeof store.db.prepare).toBe('function');
+    expect(typeof store.db.exec).toBe('function');
+    expect(typeof store.db.close).toBe('function');
+    expect(typeof store.db.getNativeDatabase).toBe('function');
     await cleanupTestDb(store);
   });
 
@@ -912,7 +916,7 @@ describe("FTS Search", () => {
 
   // BM25 IDF requires corpus depth — helper adds non-matching docs so term frequency
   // differentiation produces meaningful scores (2-doc corpus has near-zero IDF).
-  async function addNoiseDocuments(db: Database, collectionName: string, count = 8) {
+  async function addNoiseDocuments(db: IDatabase, collectionName: string, count = 8) {
     for (let i = 0; i < count; i++) {
       await insertTestDocument(db, collectionName, {
         name: `noise${i}`,

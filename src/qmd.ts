@@ -1,8 +1,8 @@
 #!/usr/bin/env bun
-import { Database } from "bun:sqlite";
 import { Glob, $ } from "bun";
 import { parseArgs } from "util";
 import { readFileSync, statSync, existsSync, unlinkSync, writeFileSync, openSync, closeSync, mkdirSync } from "fs";
+import { type IDatabase } from "./database.js";
 import {
   getPwd,
   getRealPath,
@@ -60,12 +60,13 @@ import {
   type ExpandedQuery,
   DEFAULT_EMBED_MODEL,
   DEFAULT_RERANK_MODEL,
+  DEFAULT_QUERY_MODEL,
   DEFAULT_GLOB,
   DEFAULT_MULTI_GET_MAX_BYTES,
   createStore,
   getDefaultDbPath,
 } from "./store.js";
-import { disposeDefaultLLM, withLLMSession, pullModels, DEFAULT_EMBED_MODEL_URI, DEFAULT_GENERATE_MODEL_URI, DEFAULT_RERANK_MODEL_URI, DEFAULT_MODEL_CACHE_DIR } from "./llm.js";
+import { getDefaultLLM, disposeDefaultLLM, withLLMSession, pullModels, DEFAULT_EMBED_MODEL_URI, DEFAULT_GENERATE_MODEL_URI, DEFAULT_RERANK_MODEL_URI, DEFAULT_MODEL_CACHE_DIR, type ILLMSession, type RerankDocument, type Queryable } from "./llm.js";
 import {
   formatSearchResults,
   formatDocuments,
@@ -101,7 +102,7 @@ function getStore(): ReturnType<typeof createStore> {
   return store;
 }
 
-function getDb(): Database {
+function getDb(): IDatabase {
   return getStore().db;
 }
 
@@ -122,7 +123,7 @@ function setIndexName(name: string | null): void {
   closeDb();
 }
 
-function ensureVecTable(_db: Database, dimensions: number): void {
+function ensureVecTable(_db: IDatabase, dimensions: number): void {
   // Store owns the DB; ignore `_db` and ensure vec table on the active store
   getStore().ensureVecTable(dimensions);
 }
@@ -175,7 +176,7 @@ function formatETA(seconds: number): string {
 
 
 // Check index health and print warnings/tips
-function checkIndexHealth(db: Database): void {
+function checkIndexHealth(db: IDatabase): void {
   const { needsEmbedding, totalDocs, daysStale } = getIndexHealth(db);
 
   // Warn if many docs need embedding
@@ -229,7 +230,27 @@ function computeDisplayPath(
   // Absolute fallback: use full path (should be unique)
   return filepath;
 }
+// Rerank documents using node-llama-cpp cross-encoder model
+async function rerank(query: string, documents: { file: string; text: string }[], _model: string = DEFAULT_RERANK_MODEL, _db?: IDatabase, session?: ILLMSession): Promise<{ file: string; score: number }[]> {
+  if (documents.length === 0) return [];
+  const total = documents.length;
+  process.stderr.write(`Reranking ${total} documents...\n`);
+  progress.indeterminate();
 
+  const rerankDocs: RerankDocument[] = documents.map((doc) => ({
+    file: doc.file,
+    text: doc.text.slice(0, 4000), // Truncate to context limit
+  }));
+
+  const result = session
+    ? await session.rerank(query, rerankDocs)
+    : await getDefaultLLM().rerank(query, rerankDocs);
+
+  progress.clear();
+  process.stderr.write("\n");
+
+  return result.results.map((r) => ({ file: r.file, score: r.score }));
+}
 function formatTimeAgo(date: Date): string {
   const seconds = Math.floor((Date.now() - date.getTime()) / 1000);
   if (seconds < 60) return `${seconds}s ago`;
@@ -438,7 +459,7 @@ async function updateCollections(): Promise<void> {
  * Detect which collection (if any) contains the given filesystem path.
  * Returns { collectionId, collectionName, relativePath } or null if not in any collection.
  */
-function detectCollectionFromPath(db: Database, fsPath: string): { collectionName: string; relativePath: string } | null {
+function detectCollectionFromPath(db: IDatabase, fsPath: string): { collectionName: string; relativePath: string } | null {
   const realPath = getRealPath(fsPath);
 
   // Find collections that this path is under from YAML
@@ -1953,6 +1974,52 @@ async function vectorSearch(query: string, opts: OutputOptions, _model: string =
       docid: r.docid,
     })), query, { ...opts, limit: results.length });
   }, { maxDuration: 10 * 60 * 1000, name: 'vectorSearch' });
+}
+// Expand query using structured output with GBNF grammar
+async function expandQueryStructured(query: string, includeLexical: boolean = true, context?: string, session?: ILLMSession): Promise<Queryable[]> {
+  process.stderr.write(`${c.dim}Expanding query...${c.reset}\n`);
+
+  const queryables = session
+    ? await session.expandQuery(query, { includeLexical, context })
+    : await getDefaultLLM().expandQuery(query, { includeLexical, context });
+
+  // Log the expansion as a tree
+  const lines: string[] = [];
+  const bothLabel = includeLexical ? ' · (lexical+vector)' : ' · (vector)';
+  lines.push(`${c.dim}├─ ${query}${bothLabel}${c.reset}`);
+
+  for (let i = 0; i < queryables.length; i++) {
+    const q = queryables[i];
+    if (!q || q.text === query) continue;
+
+    let textPreview = q.text.replace(/\n/g, ' ');
+    if (textPreview.length > 80) {
+      textPreview = textPreview.substring(0, 77) + '...';
+    }
+
+    const label = q.type === 'lex' ? 'lexical' : (q.type === 'hyde' ? 'hyde' : 'vector');
+    lines.push(`${c.dim}├─ ${textPreview} · (${label})${c.reset}`);
+  }
+
+  // Fix last item to use └─ instead of ├─
+  if (lines.length > 0) {
+    lines[lines.length - 1] = lines[lines.length - 1]!.replace('├─', '└─');
+  }
+
+  for (const line of lines) {
+    process.stderr.write(line + '\n');
+  }
+
+  return queryables;
+}
+
+async function expandQuery(query: string, _model: string = DEFAULT_QUERY_MODEL, _db?: IDatabase, session?: ILLMSession): Promise<string[]> {
+  const queryables = await expandQueryStructured(query, true, undefined, session);
+  const queries = new Set<string>([query]);
+  for (const q of queryables) {
+    queries.add(q.text);
+  }
+  return Array.from(queries);
 }
 
 async function querySearch(query: string, opts: OutputOptions, _embedModel: string = DEFAULT_EMBED_MODEL, _rerankModel: string = DEFAULT_RERANK_MODEL): Promise<void> {
