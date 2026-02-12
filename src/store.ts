@@ -2201,12 +2201,14 @@ export async function searchVec(db: IDatabase, query: string, model: string, lim
     if (!tableExists) return [];
     
     // Use pgvector cosine distance operator
+    // Note: We need to pass the embedding array as a parameter
+    const embeddingArray = new Float32Array(embedding);
     vecResults = db.prepare(`
-      SELECT hash_seq, (embedding <=> ?::vector) as distance
+      SELECT hash_seq, (embedding <=> $1::vector) as distance
       FROM vectors
-      ORDER BY embedding <=> ?::vector
-      LIMIT ?
-    `).all(new Float32Array(embedding), new Float32Array(embedding), limit * 3) as { hash_seq: string; distance: number }[];
+      ORDER BY distance
+      LIMIT $2
+    `).all(embeddingArray, limit * 3) as { hash_seq: string; distance: number }[];
   }
 
   if (vecResults.length === 0) return [];
