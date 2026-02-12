@@ -549,30 +549,34 @@ describeIfPostgres("Embedding Model Tracking - PostgreSQL", () => {
 
   test("searchVec filters by model_id", async () => {
     const { db, ensureVecTable } = await setupTestStore('postgres');
-    
+
+    // Use the same provider that getDefaultLLMProvider() will return
+    // In CI, this will be 'mock' due to QMD_MOCK_LLM=true
+    const provider = process.env.QMD_MOCK_LLM === "true" || process.env.CI === "true" ? "mock" : "local";
+
     // Create two different model IDs
-    const modelId1 = getOrCreateModelId(db, 'embeddinggemma', 'local', 768);
-    const modelId2 = getOrCreateModelId(db, 'other-model', 'local', 768);
-    
+    const modelId1 = getOrCreateModelId(db, 'embeddinggemma', provider, 768);
+    const modelId2 = getOrCreateModelId(db, 'other-model', provider, 768);
+
     // Insert test document
     const hash = 'testhash123';
     db.prepare(`
       INSERT INTO content (hash, doc, created_at) VALUES (?, ?, ?)
     `).run(hash, 'Test content', new Date().toISOString());
-    
+
     db.prepare(`
       INSERT INTO documents (collection, path, title, hash, active, created_at, modified_at)
       VALUES (?, ?, ?, ?, true, ?, ?)
     `).run('test-coll', 'doc.md', 'Test Doc', hash, new Date().toISOString(), new Date().toISOString());
-    
+
     // Create vectors table
     ensureVecTable(768);
-    
+
     // Insert embedding with model_id1
     const embedding = new Float32Array(768).fill(0.1);
     const now = new Date().toISOString();
     insertEmbedding(db, hash, 0, 0, embedding, 'embeddinggemma', now, modelId1);
-    
+
     // Search with embeddinggemma (should find it)
     const results1 = await searchVec(db, 'test', 'embeddinggemma', 10);
     expect(results1.length).toBeGreaterThan(0);
