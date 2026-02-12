@@ -10,6 +10,8 @@ import { describe, test, expect, beforeEach, afterEach } from "bun:test";
 import { unlink } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
+import type { Database } from "bun:sqlite";
+import * as sqliteVec from "sqlite-vec";
 import { 
   createDatabase, 
   createSQLiteDatabase,
@@ -52,7 +54,18 @@ async function createTestDatabase(type: 'sqlite' | 'postgres'): Promise<IDatabas
     return createPostgresDatabase(getTestConfig());
   } else {
     testDbPath = join(tmpdir(), `test-embedding-model-${Date.now()}-${Math.random().toString(36).slice(2)}.sqlite`);
-    return createSQLiteDatabase(testDbPath);
+    const db = createSQLiteDatabase(testDbPath);
+    
+    // Load sqlite-vec extension
+    const nativeDb = db.getNativeDatabase() as Database;
+    try {
+      sqliteVec.load(nativeDb);
+    } catch (err) {
+      console.warn("Could not load sqlite-vec extension:", err);
+      // Tests that require sqlite-vec will fail, but that's ok for now
+    }
+    
+    return db;
   }
 }
 
