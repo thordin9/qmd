@@ -2201,13 +2201,13 @@ export async function searchVec(db: IDatabase, query: string, model: string, lim
     if (!tableExists) return [];
     
     // Use pgvector cosine distance operator
-    // Note: We need to pass the embedding array as a parameter
+    // Note: We use ? placeholders which will be converted to $1, $2 by PostgresStatement
     const embeddingArray = new Float32Array(embedding);
     vecResults = db.prepare(`
-      SELECT hash_seq, (embedding <=> $1::vector) as distance
+      SELECT hash_seq, (embedding <=> ?::vector) as distance
       FROM vectors
       ORDER BY distance
-      LIMIT $2
+      LIMIT ?
     `).all(embeddingArray, limit * 3) as { hash_seq: string; distance: number }[];
   }
 
