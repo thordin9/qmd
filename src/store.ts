@@ -2382,11 +2382,35 @@ export function insertEmbedding(
   modelId?: number
 ): void {
   const hashSeq = `${hash}_${seq}`;
-  const insertVecStmt = db.prepare(`INSERT OR REPLACE INTO vectors_vec (hash_seq, embedding) VALUES (?, ?)`);
-  const insertContentVectorStmt = db.prepare(`INSERT OR REPLACE INTO content_vectors (hash, seq, pos, model, model_id, embedded_at) VALUES (?, ?, ?, ?, ?, ?)`);
-
-  insertVecStmt.run(hashSeq, embedding);
-  insertContentVectorStmt.run(hash, seq, pos, model, modelId || null, embeddedAt);
+  
+  // Use appropriate SQL syntax for SQLite vs PostgreSQL
+  if (db.supportsExtensions()) {
+    // SQLite: use INSERT OR REPLACE
+    const insertVecStmt = db.prepare(`INSERT OR REPLACE INTO vectors_vec (hash_seq, embedding) VALUES (?, ?)`);
+    const insertContentVectorStmt = db.prepare(`INSERT OR REPLACE INTO content_vectors (hash, seq, pos, model, model_id, embedded_at) VALUES (?, ?, ?, ?, ?, ?)`);
+    
+    insertVecStmt.run(hashSeq, embedding);
+    insertContentVectorStmt.run(hash, seq, pos, model, modelId || null, embeddedAt);
+  } else {
+    // PostgreSQL: use INSERT ... ON CONFLICT ... DO UPDATE
+    const insertVecStmt = db.prepare(`
+      INSERT INTO vectors (hash_seq, embedding)
+      VALUES (?, ?)
+      ON CONFLICT (hash_seq) DO UPDATE SET embedding = EXCLUDED.embedding
+    `);
+    const insertContentVectorStmt = db.prepare(`
+      INSERT INTO content_vectors (hash, seq, pos, model, model_id, embedded_at)
+      VALUES (?, ?, ?, ?, ?, ?)
+      ON CONFLICT (hash, seq) DO UPDATE SET
+        pos = EXCLUDED.pos,
+        model = EXCLUDED.model,
+        model_id = EXCLUDED.model_id,
+        embedded_at = EXCLUDED.embedded_at
+    `);
+    
+    insertVecStmt.run(hashSeq, embedding);
+    insertContentVectorStmt.run(hash, seq, pos, model, modelId || null, embeddedAt);
+  }
 }
 
 // =============================================================================
