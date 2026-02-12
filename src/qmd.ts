@@ -1820,8 +1820,7 @@ async function vectorIndex(model: string = DEFAULT_EMBED_MODEL, force: boolean =
     }
     ensureVecTable(db, firstResult.embedding.length);
 
-    // Get or create the model ID for tracking
-    const provider = getDefaultLLMProvider();
+    // Get or create the model ID for tracking (reuse provider from line 1744)
     const dimensions = firstResult.embedding.length;
     const modelId = getOrCreateModelId(db, model, provider, dimensions);
 
