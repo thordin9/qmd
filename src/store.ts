@@ -2164,8 +2164,19 @@ export function searchFTS(db: IDatabase, query: string, limit: number = 20, coll
 // =============================================================================
 
 export async function searchVec(db: IDatabase, query: string, model: string, limit: number = 20, collectionName?: string, session?: ILLMSession): Promise<SearchResult[]> {
-  const tableExists = db.prepare(`SELECT name FROM sqlite_master WHERE type='table' AND name='vectors_vec'`).get();
-  if (!tableExists) return [];
+  // Check if vector table exists (different table names for SQLite vs PostgreSQL)
+  if (db.supportsExtensions()) {
+    // SQLite: check for vectors_vec table
+    const tableExists = db.prepare(`SELECT name FROM sqlite_master WHERE type='table' AND name='vectors_vec'`).get();
+    if (!tableExists) return [];
+  } else {
+    // PostgreSQL: check for vectors table
+    const tableExists = db.prepare(`
+      SELECT table_name FROM information_schema.tables 
+      WHERE table_schema = 'public' AND table_name = 'vectors'
+    `).get();
+    if (!tableExists) return [];
+  }
 
   const embedding = await getEmbedding(query, model, true, session);
   if (!embedding) return [];
@@ -2173,6 +2184,9 @@ export async function searchVec(db: IDatabase, query: string, model: string, lim
   // Get current model ID to filter embeddings
   const provider = getDefaultLLMProvider();
   const modelId = getCurrentModelId(db, model, provider);
+  
+  // Use database-appropriate active check (SQLite: = 1, PostgreSQL: = true)
+  const activeCheck = db.supportsExtensions() ? '= 1' : '= true';
   
   // IMPORTANT: We use a two-step query approach here because sqlite-vec virtual tables
   // hang indefinitely when combined with JOINs in the same query. Do NOT try to
@@ -2204,7 +2218,7 @@ export async function searchVec(db: IDatabase, query: string, model: string, lim
       d.title,
       content.doc as body
     FROM content_vectors cv
-    JOIN documents d ON d.hash = cv.hash AND d.active = 1
+    JOIN documents d ON d.hash = cv.hash AND d.active ${activeCheck}
     JOIN content ON content.hash = d.hash
     WHERE cv.hash || '_' || cv.seq IN (${placeholders})
   `;
@@ -2289,6 +2303,9 @@ export function getHashesForEmbedding(db: IDatabase, modelName?: string, provide
     modelId = getCurrentModelId(db, modelName, provider);
   }
 
+  // Use database-appropriate active check (SQLite: = 1, PostgreSQL: = true)
+  const activeCheck = db.supportsExtensions() ? '= 1' : '= true';
+
   // Build query based on whether we're filtering by model
   if (modelId !== null) {
     // Filter for documents without embeddings OR with embeddings from different model
@@ -2297,7 +2314,7 @@ export function getHashesForEmbedding(db: IDatabase, modelName?: string, provide
       FROM documents d
       JOIN content c ON d.hash = c.hash
       LEFT JOIN content_vectors v ON d.hash = v.hash AND v.seq = 0 AND v.model_id = ?
-      WHERE d.active = 1 AND v.hash IS NULL
+      WHERE d.active ${activeCheck} AND v.hash IS NULL
       GROUP BY d.hash
     `).all(modelId) as { hash: string; body: string; path: string }[];
   } else {
@@ -2307,7 +2324,7 @@ export function getHashesForEmbedding(db: IDatabase, modelName?: string, provide
       FROM documents d
       JOIN content c ON d.hash = c.hash
       LEFT JOIN content_vectors v ON d.hash = v.hash AND v.seq = 0
-      WHERE d.active = 1 AND v.hash IS NULL
+      WHERE d.active ${activeCheck} AND v.hash IS NULL
       GROUP BY d.hash
     `).all() as { hash: string; body: string; path: string }[];
   }
@@ -2333,14 +2350,21 @@ export function getOrCreateModelId(
     return existing.id;
   }
 
-  // Create new model entry
+  // Create new model entry and return its id
   const now = new Date().toISOString();
-  const result = db.prepare(`
+  
+  // Use RETURNING for both databases (SQLite 3.35+ and PostgreSQL both support it)
+  const inserted = db.prepare(`
     INSERT INTO embedding_models (model_name, provider, dimensions, created_at)
     VALUES (?, ?, ?, ?)
-  `).run(modelName, provider, dimensions, now);
+    RETURNING id
+  `).get(modelName, provider, dimensions, now) as { id: number } | null;
 
-  return Number(result.lastInsertRowid);
+  if (!inserted) {
+    throw new Error("Failed to create embedding model entry");
+  }
+
+  return inserted.id;
 }
 
 /**
