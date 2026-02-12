@@ -2174,9 +2174,6 @@ export async function searchVec(db: IDatabase, query: string, model: string, lim
   const provider = getDefaultLLMProvider();
   const modelId = getCurrentModelId(db, model, provider);
   
-  // If no model exists yet, return empty results
-  if (modelId === null) return [];
-
   // IMPORTANT: We use a two-step query approach here because sqlite-vec virtual tables
   // hang indefinitely when combined with JOINs in the same query. Do NOT try to
   // "optimize" this by combining into a single query with JOINs - it will break.
@@ -2210,9 +2207,14 @@ export async function searchVec(db: IDatabase, query: string, model: string, lim
     JOIN documents d ON d.hash = cv.hash AND d.active = 1
     JOIN content ON content.hash = d.hash
     WHERE cv.hash || '_' || cv.seq IN (${placeholders})
-      AND cv.model_id = ?
   `;
-  const params: (string | number)[] = [...hashSeqs, modelId];
+  const params: (string | number)[] = [...hashSeqs];
+
+  // Filter by model_id if we have one, otherwise include embeddings with NULL model_id (backward compatibility)
+  if (modelId !== null) {
+    docSql += ` AND (cv.model_id = ? OR cv.model_id IS NULL)`;
+    params.push(modelId);
+  }
 
   if (collectionName) {
     docSql += ` AND d.collection = ?`;
