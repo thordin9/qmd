@@ -199,8 +199,11 @@ async function setupTestStore(type: 'sqlite' | 'postgres'): Promise<{ db: IDatab
         db.exec(`CREATE VIRTUAL TABLE vectors_vec USING vec0(hash_seq TEXT PRIMARY KEY, embedding float[${dimensions}] distance_metric=cosine)`);
       }
     } else {
+      // Enable pgvector extension
+      db.exec(`CREATE EXTENSION IF NOT EXISTS vector`);
+
       const tableExists = db.prepare(`
-        SELECT table_name FROM information_schema.tables 
+        SELECT table_name FROM information_schema.tables
         WHERE table_schema = 'public' AND table_name = 'vectors'
       `).get();
       if (!tableExists) {
