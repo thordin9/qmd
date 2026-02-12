@@ -2328,7 +2328,7 @@ export function getHashesForEmbedding(db: IDatabase, modelName?: string, provide
       JOIN content c ON d.hash = c.hash
       LEFT JOIN content_vectors v ON d.hash = v.hash AND v.seq = 0 AND v.model_id = ?
       WHERE d.active ${activeCheck} AND v.hash IS NULL
-      GROUP BY d.hash
+      GROUP BY d.hash, c.doc
     `).all(modelId) as { hash: string; body: string; path: string }[];
   } else {
     // No model filter - return documents without any embeddings
@@ -2338,7 +2338,7 @@ export function getHashesForEmbedding(db: IDatabase, modelName?: string, provide
       JOIN content c ON d.hash = c.hash
       LEFT JOIN content_vectors v ON d.hash = v.hash AND v.seq = 0
       WHERE d.active ${activeCheck} AND v.hash IS NULL
-      GROUP BY d.hash
+      GROUP BY d.hash, c.doc
     `).all() as { hash: string; body: string; path: string }[];
   }
 }
