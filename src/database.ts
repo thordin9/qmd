@@ -323,7 +323,8 @@ class PostgresStatement implements IStatement {
     const substitutions: Array<{ placeholder: string; value: string; position: number }> = [];
     
     // Find all placeholders and their positions
-    const placeholderRegex = /\$(\d+)\b/g;
+    // Use negative lookahead (?!\d) instead of \b to match $1::vector correctly
+    const placeholderRegex = /\$(\d+)(?!\d)/g;
     let match;
     while ((match = placeholderRegex.exec(sql)) !== null) {
       const paramIndex = Number(match[1]) - 1;
