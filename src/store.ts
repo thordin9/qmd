@@ -2164,20 +2164,6 @@ export function searchFTS(db: IDatabase, query: string, limit: number = 20, coll
 // =============================================================================
 
 export async function searchVec(db: IDatabase, query: string, model: string, limit: number = 20, collectionName?: string, session?: ILLMSession): Promise<SearchResult[]> {
-  // Check if vector table exists (different table names for SQLite vs PostgreSQL)
-  if (db.supportsExtensions()) {
-    // SQLite: check for vectors_vec table
-    const tableExists = db.prepare(`SELECT name FROM sqlite_master WHERE type='table' AND name='vectors_vec'`).get();
-    if (!tableExists) return [];
-  } else {
-    // PostgreSQL: check for vectors table
-    const tableExists = db.prepare(`
-      SELECT table_name FROM information_schema.tables 
-      WHERE table_schema = 'public' AND table_name = 'vectors'
-    `).get();
-    if (!tableExists) return [];
-  }
-
   const embedding = await getEmbedding(query, model, true, session);
   if (!embedding) return [];
 
@@ -2188,17 +2174,40 @@ export async function searchVec(db: IDatabase, query: string, model: string, lim
   // Use database-appropriate active check (SQLite: = 1, PostgreSQL: = true)
   const activeCheck = db.supportsExtensions() ? '= 1' : '= true';
   
-  // IMPORTANT: We use a two-step query approach here because sqlite-vec virtual tables
-  // hang indefinitely when combined with JOINs in the same query. Do NOT try to
-  // "optimize" this by combining into a single query with JOINs - it will break.
-  // See: https://github.com/tobi/qmd/pull/23
-
-  // Step 1: Get vector matches from sqlite-vec (no JOINs allowed)
-  const vecResults = db.prepare(`
-    SELECT hash_seq, distance
-    FROM vectors_vec
-    WHERE embedding MATCH ? AND k = ?
-  `).all(new Float32Array(embedding), limit * 3) as { hash_seq: string; distance: number }[];
+  let vecResults: { hash_seq: string; distance: number }[];
+  
+  if (db.supportsExtensions()) {
+    // SQLite with sqlite-vec
+    const tableExists = db.prepare(`SELECT name FROM sqlite_master WHERE type='table' AND name='vectors_vec'`).get();
+    if (!tableExists) return [];
+    
+    // IMPORTANT: We use a two-step query approach here because sqlite-vec virtual tables
+    // hang indefinitely when combined with JOINs in the same query. Do NOT try to
+    // "optimize" this by combining into a single query with JOINs - it will break.
+    // See: https://github.com/tobi/qmd/pull/23
+    
+    // Step 1: Get vector matches from sqlite-vec (no JOINs allowed)
+    vecResults = db.prepare(`
+      SELECT hash_seq, distance
+      FROM vectors_vec
+      WHERE embedding MATCH ? AND k = ?
+    `).all(new Float32Array(embedding), limit * 3) as { hash_seq: string; distance: number }[];
+  } else {
+    // PostgreSQL with pgvector
+    const tableExists = db.prepare(`
+      SELECT table_name FROM information_schema.tables 
+      WHERE table_schema = 'public' AND table_name = 'vectors'
+    `).get();
+    if (!tableExists) return [];
+    
+    // Use pgvector cosine distance operator
+    vecResults = db.prepare(`
+      SELECT hash_seq, (embedding <=> ?::vector) as distance
+      FROM vectors
+      ORDER BY embedding <=> ?::vector
+      LIMIT ?
+    `).all(new Float32Array(embedding), new Float32Array(embedding), limit * 3) as { hash_seq: string; distance: number }[];
+  }
 
   if (vecResults.length === 0) return [];
 
@@ -2206,11 +2215,15 @@ export async function searchVec(db: IDatabase, query: string, model: string, lim
   const hashSeqs = vecResults.map(r => r.hash_seq);
   const distanceMap = new Map(vecResults.map(r => [r.hash_seq, r.distance]));
 
-  // Build query for document lookup
+  // Build query for document lookup with database-appropriate concatenation
   const placeholders = hashSeqs.map(() => '?').join(',');
+  const hashSeqConcat = db.supportsExtensions() 
+    ? "cv.hash || '_' || cv.seq" 
+    : "cv.hash || '_' || cv.seq::text";
+  
   let docSql = `
     SELECT
-      cv.hash || '_' || cv.seq as hash_seq,
+      ${hashSeqConcat} as hash_seq,
       cv.hash,
       cv.pos,
       'qmd://' || d.collection || '/' || d.path as filepath,
@@ -2220,7 +2233,7 @@ export async function searchVec(db: IDatabase, query: string, model: string, lim
     FROM content_vectors cv
     JOIN documents d ON d.hash = cv.hash AND d.active ${activeCheck}
     JOIN content ON content.hash = d.hash
-    WHERE cv.hash || '_' || cv.seq IN (${placeholders})
+    WHERE ${hashSeqConcat} IN (${placeholders})
   `;
   const params: (string | number)[] = [...hashSeqs];
 
