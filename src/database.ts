@@ -300,10 +300,19 @@ export class SQLiteDatabase implements IDatabase {
  * This allows PostgreSQL to work with the synchronous IStatement interface.
  */
 class PostgresStatement implements IStatement {
+  private sql: string;
+  
   constructor(
     private config: PostgresConfig,
-    private sql: string
-  ) {}
+    sql: string
+  ) {
+    // Convert SQLite-style ? placeholders to PostgreSQL-style $n placeholders
+    let paramIndex = 0;
+    this.sql = sql.replace(/\?/g, () => {
+      paramIndex++;
+      return `$${paramIndex}`;
+    });
+  }
   
   private executePsql(sql: string, params: DatabaseValue[] = []): { rows: QueryResults; stdout: string; stderr: string; exitCode: number } {
     // Build psql connection string (without password for security)
