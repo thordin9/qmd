@@ -65,6 +65,45 @@ db.close();
 
 ### Extending with New Database Backends
 
+QMD now supports both SQLite and PostgreSQL through its database abstraction layer.
+
+#### PostgreSQL Implementation
+
+PostgreSQL support includes:
+- Process-based execution via `psql` CLI tool
+- pgvector extension for vector similarity search
+- Compatible schema with SQLite for seamless migration
+- Synchronous operations using Bun.spawnSync (no async interface needed)
+
+**Configuration:**
+
+```typescript
+import { createPostgresDatabase, createDatabaseFromEnv } from './database';
+
+// Explicit configuration
+const db = createPostgresDatabase({
+  host: 'localhost',
+  port: 5432,
+  database: 'qmd',
+  user: 'qmd_user',
+  password: 'qmd_password',
+  ssl: false,
+});
+
+// From environment variables
+const db = createDatabaseFromEnv(); // Reads QMD_DB_TYPE, QMD_POSTGRES_* vars
+```
+
+**Key Differences from SQLite:**
+
+1. **Parameter Binding:** PostgreSQL uses `$1, $2, $3` instead of `?` for placeholders
+2. **Vector Extension:** Uses pgvector instead of sqlite-vec
+3. **Full-Text Search:** Uses GIN indexes with to_tsvector instead of FTS5
+4. **Connection Model:** Each query spawns a new psql process (no persistent connections)
+5. **Execution:** Uses psql CLI via Bun.spawnSync for synchronous operations
+
+#### Adding Other Database Backends
+
 To add support for a new database backend:
 
 1. Create a class implementing `IDatabase` interface
@@ -75,27 +114,43 @@ To add support for a new database backend:
 Example:
 
 ```typescript
-export class PostgresDatabase implements IDatabase {
-  constructor(private config: PostgresConfig) {
-    // Initialize Postgres connection
+export class CustomDatabase implements IDatabase {
+  constructor(private config: CustomConfig) {
+    // Initialize connection
   }
   
   prepare(sql: string): IStatement {
-    return new PostgresStatement(this.client.prepare(sql));
+    return new CustomStatement(this.client, sql);
   }
   
-  // ... implement other methods
+  exec(sql: string): void {
+    this.client.execute(sql);
+  }
+  
+  close(): void {
+    this.client.disconnect();
+  }
+  
+  getNativeDatabase(): unknown {
+    return this.client;
+  }
+  
+  supportsExtensions(): boolean {
+    return false; // or true if dynamic extensions are supported
+  }
 }
 
 // Update factory
-export type DatabaseType = 'sqlite' | 'postgres';
+export type DatabaseType = 'sqlite' | 'postgres' | 'custom';
 
 export function createDatabase(type: DatabaseType, options: DatabaseOptions): IDatabase {
   switch (type) {
     case 'sqlite':
-      return new SQLiteDatabase(options.path);
+      return new SQLiteDatabase(options.path!);
     case 'postgres':
       return new PostgresDatabase(options.config as PostgresConfig);
+    case 'custom':
+      return new CustomDatabase(options.config as CustomConfig);
     default:
       throw new Error(`Unsupported database type: ${type}`);
   }
@@ -106,13 +161,16 @@ export function createDatabase(type: DatabaseType, options: DatabaseOptions): ID
 
 The `Store` type wraps all database operations and provides higher-level functionality:
 - Document indexing and retrieval
-- Full-text search (FTS5)
-- Vector search (sqlite-vec)
+- Full-text search (FTS5 for SQLite, GIN for PostgreSQL)
+- Vector search (sqlite-vec for SQLite, pgvector for PostgreSQL)
 - Context management
 - LLM result caching
 - Cleanup and maintenance operations
 
-The Store uses the `IDatabase` interface internally, making it database-agnostic.
+The Store uses the `IDatabase` interface internally, making it database-agnostic. The implementation automatically adapts to the underlying database type for features like:
+- Full-text search queries (FTS5 vs GIN syntax)
+- Vector operations (sqlite-vec vs pgvector)
+- Schema initialization (SQLite vs PostgreSQL DDL)
 
 ## Benefits of Abstraction
 
@@ -121,6 +179,7 @@ The Store uses the `IDatabase` interface internally, making it database-agnostic
 3. **Type Safety** - Strong TypeScript types prevent common errors
 4. **Separation of Concerns** - Database logic isolated from business logic
 5. **Extension Points** - Easy to add new database features or backends
+6. **Multi-Backend Support** - Same codebase works with SQLite (local) and PostgreSQL (centralized)
 
 ## Current Database Schema
 
@@ -130,8 +189,8 @@ The Store uses the `IDatabase` interface internally, making it database-agnostic
 - **documents** - Virtual file mapping (collection/path → content hash)
 - **llm_cache** - LLM API result caching
 - **content_vectors** - Embedding metadata
-- **vectors_vec** - Virtual table for vector similarity search (sqlite-vec)
-- **documents_fts** - Full-text search index (FTS5)
+- **vectors_vec** (SQLite) / **vectors** (PostgreSQL) - Vector index for similarity search
+- **documents_fts** - Full-text search index (FTS5 for SQLite, GIN for PostgreSQL)
 
 ### Indexes
 
@@ -141,8 +200,14 @@ The Store uses the `IDatabase` interface internally, making it database-agnostic
 
 ### Extensions
 
+**SQLite:**
 - **sqlite-vec** - Vector similarity search with cosine distance
 - **FTS5** - Full-text search with Porter stemming and Unicode support
+
+**PostgreSQL:**
+- **pgvector** - Vector similarity search with multiple distance metrics
+- **pg_trgm** - Fuzzy text matching (optional)
+- **GIN indexes** - Fast full-text search with to_tsvector
 
 ## LLM Provider Abstraction
 

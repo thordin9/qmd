@@ -1,0 +1,74 @@
+name: Tests
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    
+    services:
+      postgres:
+        image: pgvector/pgvector:pg17
+        env:
+          POSTGRES_DB: qmd
+          POSTGRES_USER: qmd_user
+          POSTGRES_PASSWORD: qmd_password
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Setup Bun
+      uses: oven-sh/setup-bun@v1
+      with:
+        bun-version: latest
+
+    - name: Install PostgreSQL client
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y postgresql-client
+
+    - name: Verify psql installation
+      run: psql --version
+
+    - name: Install dependencies
+      run: bun install
+
+    - name: Run SQLite tests
+      run: bun test src/database.test.ts
+      env:
+        INDEX_PATH: /tmp/test-qmd.sqlite
+        QMD_MOCK_LLM: "true"
+
+    - name: Run PostgreSQL tests
+      run: bun test src/database.postgres.test.ts
+      env:
+        QMD_TEST_POSTGRES: "true"
+        QMD_POSTGRES_HOST: localhost
+        QMD_POSTGRES_PORT: 5432
+        QMD_POSTGRES_DB: qmd
+        QMD_POSTGRES_USER: qmd_user
+        QMD_POSTGRES_PASSWORD: qmd_password
+        QMD_MOCK_LLM: "true"
+
+    - name: Run all tests
+      run: bun test
+      env:
+        INDEX_PATH: /tmp/test-qmd.sqlite
+        QMD_TEST_POSTGRES: "true"
+        QMD_POSTGRES_HOST: localhost
+        QMD_POSTGRES_PORT: 5432
+        QMD_POSTGRES_DB: qmd
+        QMD_POSTGRES_USER: qmd_user
+        QMD_POSTGRES_PASSWORD: qmd_password
+        QMD_MOCK_LLM: "true"

@@ -3,6 +3,7 @@
  *
  * Tests all MCP tools, resources, and prompts.
  * Uses mocked Ollama responses and a test database.
+ * Skipped when QMD_MOCK_LLM=true or CI=true to avoid model downloads.
  */
 
 import { describe, test, expect, beforeAll, afterAll, beforeEach, afterEach } from "bun:test";
@@ -18,6 +19,10 @@ import YAML from "yaml";
 import type { CollectionConfig } from "./collections";
 import type { IDatabase } from "./database";
 
+// Skip MCP tests when mock mode is enabled  
+const isMockMode = Bun.env.QMD_MOCK_LLM === "true" || Bun.env.CI === "true";
+const describeIfReal = isMockMode ? describe.skip : describe;
+
 // =============================================================================
 // Test Database Setup
 // =============================================================================
@@ -28,7 +33,9 @@ let testConfigDir: string;
 
 afterAll(async () => {
   // Ensure native resources are released to avoid ggml-metal asserts on process exit.
-  await disposeDefaultLlamaCpp();
+  if (!isMockMode) {
+    await disposeDefaultLlamaCpp();
+  }
 });
 
 function initTestDatabase(db: IDatabase): void {
@@ -202,7 +209,7 @@ import type { RankedResult } from "./store";
 // Tests
 // =============================================================================
 
-describe("MCP Server", () => {
+describeIfReal("MCP Server", () => {
   beforeAll(async () => {
     // LlamaCpp uses node-llama-cpp for local model inference (no HTTP mocking needed)
     // Use shared singleton to avoid creating multiple instances with separate GPU resources
@@ -872,7 +879,7 @@ describe("MCP Server", () => {
 import { startMcpHttpServer, type HttpServerHandle } from "./mcp";
 import { enableProductionMode } from "./store";
 
-describe("MCP HTTP Transport", () => {
+describeIfReal("MCP HTTP Transport", () => {
   let handle: HttpServerHandle;
   let baseUrl: string;
   let httpTestDbPath: string;

@@ -183,7 +183,7 @@ export type RerankDocument = {
 /**
  * Backing inference provider
  */
-export type LLMProvider = "local" | "openrouter" | "ollama";
+export type LLMProvider = "local" | "openrouter" | "ollama" | "mock";
 
 // =============================================================================
 // Model Configuration
@@ -1815,7 +1815,17 @@ function warnOllamaOnce(): void {
  * Defaults to local so remote inference is always opt-in.
  */
 export function getDefaultLLMProvider(): LLMProvider {
-  return defaultLLMProvider ?? normalizeProvider(process.env.QMD_LLM_PROVIDER);
+  // Respect explicit provider setting first, then check for mock mode
+  const explicitProvider = defaultLLMProvider ?? normalizeProvider(process.env.QMD_LLM_PROVIDER);
+  if (explicitProvider !== "local") {
+    return explicitProvider;
+  }
+  
+  // Only use mock for default "local" provider when mock mode is enabled
+  if (process.env.QMD_MOCK_LLM === "true" || process.env.CI === "true") {
+    return "mock";
+  }
+  return "local";
 }
 
 function getDefaultOpenRouterLLM(): OpenRouterLLM {
@@ -1833,14 +1843,24 @@ function getDefaultOllamaLLM(): OllamaLLM {
 }
 
 /**
- * Get the default LLM instance (local, OpenRouter, or Ollama based on QMD_LLM_PROVIDER).
+ * Get the default LLM instance (local, OpenRouter, Ollama, or Mock based on environment).
  */
 export function getDefaultLLM(): LLM {
-  const provider = normalizeProvider(process.env.QMD_LLM_PROVIDER);
+  // Determine which provider to use (respects explicit settings before mock mode)
+  const provider = getDefaultLLMProvider();
+  
+  // Use mock LLM if provider is "mock"
+  if (provider === "mock") {
+    const { getMockLLM } = require("./llm.mock.js");
+    return getMockLLM();
+  }
+  
+  // Return cached LLM if provider hasn't changed
   if (defaultLLM && defaultLLMProvider === provider) {
     return defaultLLM;
   }
 
+  // Dispose old LLM if provider changed
   if (defaultLLM && defaultLLMProvider !== provider) {
     defaultSessionManager = null;
     void defaultLLM.dispose().catch(() => {});

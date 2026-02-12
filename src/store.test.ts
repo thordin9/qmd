@@ -4,6 +4,7 @@
  * Run with: bun test store.test.ts
  *
  * LLM operations use LlamaCpp with local GGUF models (node-llama-cpp).
+ * When QMD_MOCK_LLM=true, MockLLM is used instead for CI testing.
  */
 
 import { describe, test, expect, beforeAll, afterAll, beforeEach, afterEach, mock, spyOn } from "bun:test";
@@ -43,6 +44,14 @@ import {
   type RankedResult,
 } from "./store.js";
 import type { CollectionConfig } from "./collections.js";
+
+// =============================================================================
+// Test Configuration
+// =============================================================================
+
+// Skip LlamaCpp-specific tests when mock mode is enabled
+const isMockMode = Bun.env.QMD_MOCK_LLM === "true" || Bun.env.CI === "true";
+const describeIfReal = isMockMode ? describe.skip : describe;
 
 // =============================================================================
 // LlamaCpp Setup
@@ -608,7 +617,7 @@ describe("Document Chunking", () => {
   });
 });
 
-describe("Token-based Chunking", () => {
+describeIfReal("Token-based Chunking", () => {
   test("chunkDocumentByTokens returns single chunk for small documents", async () => {
     const content = "This is a small document.";
     const chunks = await chunkDocumentByTokens(content, 800, 120);

@@ -4,11 +4,14 @@ node_modules/
 archive/
 texts/
 .cursor/
-.github/
+.github/*
+!.github/workflows/
 *.md
 !README.md
 !CLAUDE.md
 !ARCHITECTURE.md
+!POSTGRES_TESTING.md
+!POSTGRES_IMPLEMENTATION.md
 !skills/**/*.md
 !finetune/*.md
 finetune/outputs/
