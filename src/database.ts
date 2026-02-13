@@ -364,7 +364,7 @@ class PostgresStatement implements IStatement {
         param instanceof Int32Array ||
         param instanceof Uint32Array
       ) {
-        // Convert arrays and typed arrays to PostgreSQL array literal
+        // Convert arrays and typed arrays to PostgreSQL array literal (pgvector format)
         const elements = Array.from(param as ArrayLike<number>).map((v) => {
           if (v === null || v === undefined) {
             return 'NULL';
@@ -374,7 +374,8 @@ class PostgresStatement implements IStatement {
           }
           return String(v);
         });
-        value = `'[${elements.join(',')}]'`;
+        // Format with spaces after commas for pgvector compatibility
+        value = `'[${elements.join(', ')}]'`;
       } else if (typeof param === 'number') {
         value = String(param);
       } else {

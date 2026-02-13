@@ -208,7 +208,11 @@ async function setupTestStore(type: 'sqlite' | 'postgres'): Promise<{ db: IDatab
       `).get();
       if (!tableExists) {
         db.exec(`CREATE TABLE vectors (hash_seq TEXT PRIMARY KEY, embedding vector(${dimensions}))`);
-        db.exec(`CREATE INDEX IF NOT EXISTS idx_vectors_embedding ON vectors USING ivfflat (embedding vector_cosine_ops) WITH (lists = 100)`);
+        // Note: Skip IVFFlat index for tests — IVFFlat requires meaningful data at
+        // index creation time (it builds Voronoi partition centroids from existing rows).
+        // With very few rows or an empty table, queries will miss vectors entirely
+        // because the default probes=1 checks only one of the 100 empty partitions.
+        // Exact sequential scan is fine for test-scale data.
       }
     }
   };

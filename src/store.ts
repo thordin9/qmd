@@ -2204,7 +2204,7 @@ export async function searchVec(db: IDatabase, query: string, model: string, lim
     // Note: We use ? placeholders which will be converted to $1, $2 by PostgresStatement
     const embeddingArray = new Float32Array(embedding);
     vecResults = db.prepare(`
-      SELECT hash_seq, (embedding <=> ?::vector) as distance
+      SELECT hash_seq, (embedding <=> CAST(? AS vector)) as distance
       FROM vectors
       ORDER BY distance
       LIMIT ?
@@ -2432,9 +2432,10 @@ export function insertEmbedding(
     insertContentVectorStmt.run(hash, seq, pos, model, modelId || null, embeddedAt);
   } else {
     // PostgreSQL: use INSERT ... ON CONFLICT ... DO UPDATE
+    // Note: We cast the parameter to pgvector type explicitly using CAST
     const insertVecStmt = db.prepare(`
       INSERT INTO vectors (hash_seq, embedding)
-      VALUES (?, ?)
+      VALUES (?, CAST(? AS vector))
       ON CONFLICT (hash_seq) DO UPDATE SET embedding = EXCLUDED.embedding
     `);
     const insertContentVectorStmt = db.prepare(`
