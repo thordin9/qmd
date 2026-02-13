@@ -510,14 +510,28 @@ function initializeSQLiteDatabase(db: IDatabase): void {
     db.exec(`DROP TABLE IF EXISTS content_vectors`);
     db.exec(`DROP TABLE IF EXISTS vectors_vec`);
   }
+  // Embedding models table - tracks embedding model metadata
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS embedding_models (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      model_name TEXT NOT NULL,
+      provider TEXT NOT NULL,
+      dimensions INTEGER NOT NULL,
+      created_at TEXT NOT NULL,
+      UNIQUE(model_name, provider, dimensions)
+    )
+  `);
+
   db.exec(`
     CREATE TABLE IF NOT EXISTS content_vectors (
       hash TEXT NOT NULL,
       seq INTEGER NOT NULL DEFAULT 0,
       pos INTEGER NOT NULL DEFAULT 0,
       model TEXT NOT NULL,
+      model_id INTEGER,
       embedded_at TEXT NOT NULL,
-      PRIMARY KEY (hash, seq)
+      PRIMARY KEY (hash, seq),
+      FOREIGN KEY (model_id) REFERENCES embedding_models(id)
     )
   `);
 
@@ -646,14 +660,28 @@ function initializePostgresDatabase(db: IDatabase): void {
     }
   }
   
+  // Embedding models table - tracks embedding model metadata
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS embedding_models (
+      id SERIAL PRIMARY KEY,
+      model_name TEXT NOT NULL,
+      provider TEXT NOT NULL,
+      dimensions INTEGER NOT NULL,
+      created_at TIMESTAMP NOT NULL,
+      UNIQUE(model_name, provider, dimensions)
+    )
+  `);
+
   db.exec(`
     CREATE TABLE IF NOT EXISTS content_vectors (
       hash TEXT NOT NULL,
       seq INTEGER NOT NULL DEFAULT 0,
       pos INTEGER NOT NULL DEFAULT 0,
       model TEXT NOT NULL,
+      model_id INTEGER,
       embedded_at TIMESTAMP NOT NULL,
-      PRIMARY KEY (hash, seq)
+      PRIMARY KEY (hash, seq),
+      FOREIGN KEY (model_id) REFERENCES embedding_models(id)
     )
   `);
 
@@ -850,9 +878,11 @@ export type Store = {
   getActiveDocumentPaths: (collectionName: string) => string[];
 
   // Vector/embedding operations
-  getHashesForEmbedding: () => { hash: string; body: string; path: string }[];
+  getHashesForEmbedding: (modelName?: string, provider?: string) => { hash: string; body: string; path: string }[];
   clearAllEmbeddings: () => void;
-  insertEmbedding: (hash: string, seq: number, pos: number, embedding: Float32Array, model: string, embeddedAt: string) => void;
+  insertEmbedding: (hash: string, seq: number, pos: number, embedding: Float32Array, model: string, embeddedAt: string, modelId?: number) => void;
+  getOrCreateModelId: (modelName: string, provider: string, dimensions: number) => number;
+  getCurrentModelId: (modelName: string, provider: string) => number | null;
 };
 
 /**
@@ -947,9 +977,11 @@ export function createStore(dbPath?: string): Store {
     getActiveDocumentPaths: (collectionName: string) => getActiveDocumentPaths(db, collectionName),
 
     // Vector/embedding operations
-    getHashesForEmbedding: () => getHashesForEmbedding(db),
+    getHashesForEmbedding: (modelName?: string, provider?: string) => getHashesForEmbedding(db, modelName, provider),
     clearAllEmbeddings: () => clearAllEmbeddings(db),
-    insertEmbedding: (hash: string, seq: number, pos: number, embedding: Float32Array, model: string, embeddedAt: string) => insertEmbedding(db, hash, seq, pos, embedding, model, embeddedAt),
+    insertEmbedding: (hash: string, seq: number, pos: number, embedding: Float32Array, model: string, embeddedAt: string, modelId?: number) => insertEmbedding(db, hash, seq, pos, embedding, model, embeddedAt, modelId),
+    getOrCreateModelId: (modelName: string, provider: string, dimensions: number) => getOrCreateModelId(db, modelName, provider, dimensions),
+    getCurrentModelId: (modelName: string, provider: string) => getCurrentModelId(db, modelName, provider),
   };
 }
 
@@ -2132,35 +2164,68 @@ export function searchFTS(db: IDatabase, query: string, limit: number = 20, coll
 // =============================================================================
 
 export async function searchVec(db: IDatabase, query: string, model: string, limit: number = 20, collectionName?: string, session?: ILLMSession): Promise<SearchResult[]> {
-  const tableExists = db.prepare(`SELECT name FROM sqlite_master WHERE type='table' AND name='vectors_vec'`).get();
-  if (!tableExists) return [];
-
   const embedding = await getEmbedding(query, model, true, session);
   if (!embedding) return [];
 
-  // IMPORTANT: We use a two-step query approach here because sqlite-vec virtual tables
-  // hang indefinitely when combined with JOINs in the same query. Do NOT try to
-  // "optimize" this by combining into a single query with JOINs - it will break.
-  // See: https://github.com/tobi/qmd/pull/23
-
-  // Step 1: Get vector matches from sqlite-vec (no JOINs allowed)
-  const vecResults = db.prepare(`
-    SELECT hash_seq, distance
-    FROM vectors_vec
-    WHERE embedding MATCH ? AND k = ?
-  `).all(new Float32Array(embedding), limit * 3) as { hash_seq: string; distance: number }[];
+  // Get current model ID to filter embeddings
+  const provider = getDefaultLLMProvider();
+  const modelId = getCurrentModelId(db, model, provider);
+  
+  // Use database-appropriate active check (SQLite: = 1, PostgreSQL: = true)
+  const activeCheck = db.supportsExtensions() ? '= 1' : '= true';
+  
+  let vecResults: { hash_seq: string; distance: number }[];
+  
+  if (db.supportsExtensions()) {
+    // SQLite with sqlite-vec
+    const tableExists = db.prepare(`SELECT name FROM sqlite_master WHERE type='table' AND name='vectors_vec'`).get();
+    if (!tableExists) return [];
+    
+    // IMPORTANT: We use a two-step query approach here because sqlite-vec virtual tables
+    // hang indefinitely when combined with JOINs in the same query. Do NOT try to
+    // "optimize" this by combining into a single query with JOINs - it will break.
+    // See: https://github.com/tobi/qmd/pull/23
+    
+    // Step 1: Get vector matches from sqlite-vec (no JOINs allowed)
+    vecResults = db.prepare(`
+      SELECT hash_seq, distance
+      FROM vectors_vec
+      WHERE embedding MATCH ? AND k = ?
+    `).all(new Float32Array(embedding), limit * 3) as { hash_seq: string; distance: number }[];
+  } else {
+    // PostgreSQL with pgvector
+    const tableExists = db.prepare(`
+      SELECT table_name FROM information_schema.tables 
+      WHERE table_schema = 'public' AND table_name = 'vectors'
+    `).get();
+    if (!tableExists) return [];
+    
+    // Use pgvector cosine distance operator
+    // Note: We use ? placeholders which will be converted to $1, $2 by PostgresStatement
+    const embeddingArray = new Float32Array(embedding);
+    vecResults = db.prepare(`
+      SELECT hash_seq, (embedding <=> CAST(? AS vector)) as distance
+      FROM vectors
+      ORDER BY distance
+      LIMIT ?
+    `).all(embeddingArray, limit * 3) as { hash_seq: string; distance: number }[];
+  }
 
   if (vecResults.length === 0) return [];
 
-  // Step 2: Get chunk info and document data
+  // Step 2: Get chunk info and document data, filtering by model_id
   const hashSeqs = vecResults.map(r => r.hash_seq);
   const distanceMap = new Map(vecResults.map(r => [r.hash_seq, r.distance]));
 
-  // Build query for document lookup
+  // Build query for document lookup with database-appropriate concatenation
   const placeholders = hashSeqs.map(() => '?').join(',');
+  const hashSeqConcat = db.supportsExtensions() 
+    ? "cv.hash || '_' || cv.seq" 
+    : "cv.hash || '_' || cv.seq::text";
+  
   let docSql = `
     SELECT
-      cv.hash || '_' || cv.seq as hash_seq,
+      ${hashSeqConcat} as hash_seq,
       cv.hash,
       cv.pos,
       'qmd://' || d.collection || '/' || d.path as filepath,
@@ -2168,11 +2233,17 @@ export async function searchVec(db: IDatabase, query: string, model: string, lim
       d.title,
       content.doc as body
     FROM content_vectors cv
-    JOIN documents d ON d.hash = cv.hash AND d.active = 1
+    JOIN documents d ON d.hash = cv.hash AND d.active ${activeCheck}
     JOIN content ON content.hash = d.hash
-    WHERE cv.hash || '_' || cv.seq IN (${placeholders})
+    WHERE ${hashSeqConcat} IN (${placeholders})
   `;
-  const params: string[] = [...hashSeqs];
+  const params: (string | number)[] = [...hashSeqs];
+
+  // Filter by model_id if we have one, otherwise include embeddings with NULL model_id (backward compatibility)
+  if (modelId !== null) {
+    docSql += ` AND (cv.model_id = ? OR cv.model_id IS NULL)`;
+    params.push(modelId);
+  }
 
   if (collectionName) {
     docSql += ` AND d.collection = ?`;
@@ -2237,16 +2308,93 @@ async function getEmbedding(text: string, model: string, isQuery: boolean, sessi
 /**
  * Get all unique content hashes that need embeddings (from active documents).
  * Returns hash, document body, and a sample path for display purposes.
+ * Excludes documents that already have embeddings for the current model.
+ * Documents with embeddings from different models will be returned (need re-embedding).
  */
-export function getHashesForEmbedding(db: IDatabase): { hash: string; body: string; path: string }[] {
-  return db.prepare(`
-    SELECT d.hash, c.doc as body, MIN(d.path) as path
-    FROM documents d
-    JOIN content c ON d.hash = c.hash
-    LEFT JOIN content_vectors v ON d.hash = v.hash AND v.seq = 0
-    WHERE d.active = 1 AND v.hash IS NULL
-    GROUP BY d.hash
-  `).all() as { hash: string; body: string; path: string }[];
+export function getHashesForEmbedding(db: IDatabase, modelName?: string, provider?: string): { hash: string; body: string; path: string }[] {
+  // If model info provided, get the current model ID
+  let modelId: number | null = null;
+  if (modelName && provider) {
+    modelId = getCurrentModelId(db, modelName, provider);
+  }
+
+  // Use database-appropriate active check (SQLite: = 1, PostgreSQL: = true)
+  const activeCheck = db.supportsExtensions() ? '= 1' : '= true';
+
+  // Build query based on whether we're filtering by model
+  if (modelId !== null) {
+    // Filter for documents without embeddings OR with embeddings from different model
+    return db.prepare(`
+      SELECT d.hash, c.doc as body, MIN(d.path) as path
+      FROM documents d
+      JOIN content c ON d.hash = c.hash
+      LEFT JOIN content_vectors v ON d.hash = v.hash AND v.seq = 0 AND v.model_id = ?
+      WHERE d.active ${activeCheck} AND v.hash IS NULL
+      GROUP BY d.hash, c.doc
+    `).all(modelId) as { hash: string; body: string; path: string }[];
+  } else {
+    // No model filter - return documents without any embeddings
+    return db.prepare(`
+      SELECT d.hash, c.doc as body, MIN(d.path) as path
+      FROM documents d
+      JOIN content c ON d.hash = c.hash
+      LEFT JOIN content_vectors v ON d.hash = v.hash AND v.seq = 0
+      WHERE d.active ${activeCheck} AND v.hash IS NULL
+      GROUP BY d.hash, c.doc
+    `).all() as { hash: string; body: string; path: string }[];
+  }
+}
+
+/**
+ * Get or create an embedding model ID in the database.
+ * This ensures we track which specific model/provider/dimensions combination generated each embedding.
+ */
+export function getOrCreateModelId(
+  db: IDatabase,
+  modelName: string,
+  provider: string,
+  dimensions: number
+): number {
+  // Try to find existing model
+  const existing = db.prepare(`
+    SELECT id FROM embedding_models
+    WHERE model_name = ? AND provider = ? AND dimensions = ?
+  `).get(modelName, provider, dimensions) as { id: number } | null;
+
+  if (existing) {
+    return existing.id;
+  }
+
+  // Create new model entry and return its id
+  const now = new Date().toISOString();
+  
+  // Use RETURNING for both databases (SQLite 3.35+ and PostgreSQL both support it)
+  const inserted = db.prepare(`
+    INSERT INTO embedding_models (model_name, provider, dimensions, created_at)
+    VALUES (?, ?, ?, ?)
+    RETURNING id
+  `).get(modelName, provider, dimensions, now) as { id: number } | null;
+
+  if (!inserted) {
+    throw new Error("Failed to create embedding model entry");
+  }
+
+  return inserted.id;
+}
+
+/**
+ * Get the current model ID for the active embedding model.
+ * Returns null if no embeddings exist yet.
+ */
+export function getCurrentModelId(db: IDatabase, modelName: string, provider: string): number | null {
+  const result = db.prepare(`
+    SELECT id, dimensions FROM embedding_models
+    WHERE model_name = ? AND provider = ?
+    ORDER BY created_at DESC
+    LIMIT 1
+  `).get(modelName, provider) as { id: number; dimensions: number } | null;
+
+  return result?.id || null;
 }
 
 /**
@@ -2269,14 +2417,40 @@ export function insertEmbedding(
   pos: number,
   embedding: Float32Array,
   model: string,
-  embeddedAt: string
+  embeddedAt: string,
+  modelId?: number
 ): void {
   const hashSeq = `${hash}_${seq}`;
-  const insertVecStmt = db.prepare(`INSERT OR REPLACE INTO vectors_vec (hash_seq, embedding) VALUES (?, ?)`);
-  const insertContentVectorStmt = db.prepare(`INSERT OR REPLACE INTO content_vectors (hash, seq, pos, model, embedded_at) VALUES (?, ?, ?, ?, ?)`);
-
-  insertVecStmt.run(hashSeq, embedding);
-  insertContentVectorStmt.run(hash, seq, pos, model, embeddedAt);
+  
+  // Use appropriate SQL syntax for SQLite vs PostgreSQL
+  if (db.supportsExtensions()) {
+    // SQLite: use INSERT OR REPLACE
+    const insertVecStmt = db.prepare(`INSERT OR REPLACE INTO vectors_vec (hash_seq, embedding) VALUES (?, ?)`);
+    const insertContentVectorStmt = db.prepare(`INSERT OR REPLACE INTO content_vectors (hash, seq, pos, model, model_id, embedded_at) VALUES (?, ?, ?, ?, ?, ?)`);
+    
+    insertVecStmt.run(hashSeq, embedding);
+    insertContentVectorStmt.run(hash, seq, pos, model, modelId || null, embeddedAt);
+  } else {
+    // PostgreSQL: use INSERT ... ON CONFLICT ... DO UPDATE
+    // Note: We cast the parameter to pgvector type explicitly using CAST
+    const insertVecStmt = db.prepare(`
+      INSERT INTO vectors (hash_seq, embedding)
+      VALUES (?, CAST(? AS vector))
+      ON CONFLICT (hash_seq) DO UPDATE SET embedding = EXCLUDED.embedding
+    `);
+    const insertContentVectorStmt = db.prepare(`
+      INSERT INTO content_vectors (hash, seq, pos, model, model_id, embedded_at)
+      VALUES (?, ?, ?, ?, ?, ?)
+      ON CONFLICT (hash, seq) DO UPDATE SET
+        pos = EXCLUDED.pos,
+        model = EXCLUDED.model,
+        model_id = EXCLUDED.model_id,
+        embedded_at = EXCLUDED.embedded_at
+    `);
+    
+    insertVecStmt.run(hashSeq, embedding);
+    insertContentVectorStmt.run(hash, seq, pos, model, modelId || null, embeddedAt);
+  }
 }
 
 // =============================================================================

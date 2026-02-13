@@ -24,6 +24,8 @@ import {
   getHashesForEmbedding,
   clearAllEmbeddings,
   insertEmbedding,
+  getOrCreateModelId,
+  getCurrentModelId,
   getStatus,
   hashContent,
   extractTitle,
@@ -66,7 +68,7 @@ import {
   createStore,
   getDefaultDbPath,
 } from "./store.js";
-import { getDefaultLLM, disposeDefaultLLM, withLLMSession, pullModels, DEFAULT_EMBED_MODEL_URI, DEFAULT_GENERATE_MODEL_URI, DEFAULT_RERANK_MODEL_URI, DEFAULT_MODEL_CACHE_DIR, type ILLMSession, type RerankDocument, type Queryable } from "./llm.js";
+import { getDefaultLLM, disposeDefaultLLM, withLLMSession, pullModels, getDefaultLLMProvider, DEFAULT_EMBED_MODEL_URI, DEFAULT_GENERATE_MODEL_URI, DEFAULT_RERANK_MODEL_URI, DEFAULT_MODEL_CACHE_DIR, type ILLMSession, type RerankDocument, type Queryable } from "./llm.js";
 import {
   formatSearchResults,
   formatDocuments,
@@ -1738,8 +1740,12 @@ async function vectorIndex(model: string = DEFAULT_EMBED_MODEL, force: boolean =
     clearAllEmbeddings(db);
   }
 
+  // Get provider to check for embeddings from current model
+  const provider = getDefaultLLMProvider();
+
   // Find unique hashes that need embedding (from active documents)
-  const hashesToEmbed = getHashesForEmbedding(db);
+  // This now filters out documents that already have embeddings for the current model
+  const hashesToEmbed = getHashesForEmbedding(db, model, provider);
 
   if (hashesToEmbed.length === 0) {
     console.log(`${c.green}✓ All content hashes already have embeddings.${c.reset}`);
@@ -1814,6 +1820,10 @@ async function vectorIndex(model: string = DEFAULT_EMBED_MODEL, force: boolean =
     }
     ensureVecTable(db, firstResult.embedding.length);
 
+    // Get or create the model ID for tracking (reuse provider from line 1744)
+    const dimensions = firstResult.embedding.length;
+    const modelId = getOrCreateModelId(db, model, provider, dimensions);
+
     let chunksEmbedded = 0, errors = 0, bytesProcessed = 0;
     const startTime = Date.now();
 
@@ -1838,7 +1848,7 @@ async function vectorIndex(model: string = DEFAULT_EMBED_MODEL, force: boolean =
           const embedding = embeddings[i];
 
           if (embedding) {
-            insertEmbedding(db, chunk.hash, chunk.seq, chunk.pos, new Float32Array(embedding.embedding), model, now);
+            insertEmbedding(db, chunk.hash, chunk.seq, chunk.pos, new Float32Array(embedding.embedding), model, now, modelId);
             chunksEmbedded++;
           } else {
             errors++;
@@ -1853,7 +1863,7 @@ async function vectorIndex(model: string = DEFAULT_EMBED_MODEL, force: boolean =
             const text = formatDocForEmbedding(chunk.text, chunk.title);
             const result = await session.embed(text);
             if (result) {
-              insertEmbedding(db, chunk.hash, chunk.seq, chunk.pos, new Float32Array(result.embedding), model, now);
+              insertEmbedding(db, chunk.hash, chunk.seq, chunk.pos, new Float32Array(result.embedding), model, now, modelId);
               chunksEmbedded++;
             } else {
               errors++;

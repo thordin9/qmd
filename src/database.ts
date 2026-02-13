@@ -300,10 +300,19 @@ export class SQLiteDatabase implements IDatabase {
  * This allows PostgreSQL to work with the synchronous IStatement interface.
  */
 class PostgresStatement implements IStatement {
+  private sql: string;
+  
   constructor(
     private config: PostgresConfig,
-    private sql: string
-  ) {}
+    sql: string
+  ) {
+    // Convert SQLite-style ? placeholders to PostgreSQL-style $n placeholders
+    let paramIndex = 0;
+    this.sql = sql.replace(/\?/g, () => {
+      paramIndex++;
+      return `$${paramIndex}`;
+    });
+  }
   
   private executePsql(sql: string, params: DatabaseValue[] = []): { rows: QueryResults; stdout: string; stderr: string; exitCode: number } {
     // Build psql connection string (without password for security)
@@ -314,7 +323,8 @@ class PostgresStatement implements IStatement {
     const substitutions: Array<{ placeholder: string; value: string; position: number }> = [];
     
     // Find all placeholders and their positions
-    const placeholderRegex = /\$(\d+)\b/g;
+    // Use negative lookahead (?!\d) instead of \b to match $1::vector correctly
+    const placeholderRegex = /\$(\d+)(?!\d)/g;
     let match;
     while ((match = placeholderRegex.exec(sql)) !== null) {
       const paramIndex = Number(match[1]) - 1;
@@ -354,7 +364,7 @@ class PostgresStatement implements IStatement {
         param instanceof Int32Array ||
         param instanceof Uint32Array
       ) {
-        // Convert arrays and typed arrays to PostgreSQL array literal
+        // Convert arrays and typed arrays to PostgreSQL array literal (pgvector format)
         const elements = Array.from(param as ArrayLike<number>).map((v) => {
           if (v === null || v === undefined) {
             return 'NULL';
@@ -364,7 +374,8 @@ class PostgresStatement implements IStatement {
           }
           return String(v);
         });
-        value = `'[${elements.join(',')}]'`;
+        // Format with spaces after commas for pgvector compatibility
+        value = `'[${elements.join(', ')}]'`;
       } else if (typeof param === 'number') {
         value = String(param);
       } else {
